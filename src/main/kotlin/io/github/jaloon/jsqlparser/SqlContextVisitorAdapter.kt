@@ -50,6 +50,11 @@ import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * SQL上下文访问器适配器
+ * @author jaloon
+ * @since 4.6
+ */
 @Suppress("UNCHECKED_CAST")
 open class SqlContextVisitorAdapter : SqlContextVisitor {
     protected fun visitBinaryExpression(expr: BinaryExpression?, context: SqlContext): Boolean {
