@@ -8,19 +8,16 @@ import net.sf.jsqlparser.parser.SimpleNode
 
 class SimpleExpression(var value: String?) : Expression {
 
-    override fun accept(expressionVisitor: ExpressionVisitor) {}
+    override fun <T : Any?, S : Any?> accept(expressionVisitor: ExpressionVisitor<T?>?, context: S?) = null
 
     fun accept(visitor: SqlContextVisitor, context: SqlContext) {
         visitor.visit(this, context)
     }
 
-    override fun getASTNode(): SimpleNode? {
-        return null
-    }
+    override fun getASTNode() = null
 
     override fun setASTNode(node: SimpleNode) {}
 
-    override fun toString(): String {
-        return value ?: ""
-    }
+    override fun toString() = value ?: ""
+
 }

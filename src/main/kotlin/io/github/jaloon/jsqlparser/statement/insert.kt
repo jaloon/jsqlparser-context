@@ -5,9 +5,13 @@ import io.github.jaloon.jsqlparser.SqlContextVisitor
 import net.sf.jsqlparser.statement.insert.Insert
 import net.sf.jsqlparser.statement.insert.InsertConflictAction
 import net.sf.jsqlparser.statement.insert.InsertConflictTarget
+import net.sf.jsqlparser.statement.insert.ParenthesedInsert
 
 fun Insert.accept(visitor: SqlContextVisitor, context: SqlContext) {
-    visitor.visit(this, context)
+    when (this) {
+        is ParenthesedInsert -> visitor.visit(this, context)
+        else                 -> visitor.visit(this, context)
+    }
 }
 
 fun InsertConflictAction.accept(visitor: SqlContextVisitor, context: SqlContext) {

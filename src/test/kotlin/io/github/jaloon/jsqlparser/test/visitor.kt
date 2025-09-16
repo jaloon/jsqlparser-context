@@ -1,7 +1,14 @@
-package io.github.jaloon.jsqlparser
+package io.github.jaloon.jsqlparser.test
 
+import io.github.jaloon.jsqlparser.SqlContext
+import io.github.jaloon.jsqlparser.SqlContextVisitorAdapter
+import io.github.jaloon.jsqlparser.expression.SimpleExpression
+import net.sf.jsqlparser.expression.UserVariable
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
+import net.sf.jsqlparser.statement.DeclareStatement
+import kotlin.reflect.jvm.isAccessible
+import kotlin.reflect.jvm.javaField
 
 fun main() {
     val dateTimeRemover = DateTimeRemover()
@@ -9,6 +16,17 @@ fun main() {
     val statements = CCJSqlParserUtil.parseStatements(sql)
     dateTimeRemover.visit(statements) { }
     println(statements)
+
+    val typeDefExpr = DeclareStatement.TypeDefExpr(
+        UserVariable("date"),
+        null,
+        SimpleExpression("abc")
+    )
+
+    val property = DeclareStatement.TypeDefExpr::userVariable
+    property.isAccessible = true
+    property.javaField?.set(typeDefExpr, UserVariable("test"))
+    println(typeDefExpr)
 }
 
 class DateTimeRemover : SqlContextVisitorAdapter() {
@@ -32,7 +50,7 @@ class DateTimeRemover : SqlContextVisitorAdapter() {
         if (isDateCondition(expr)) {
             context.remove()
         } else {
-            visitBinaryExpression(expr, context)
+            //            visitBinaryExpression(expr, context)
         }
     }
 

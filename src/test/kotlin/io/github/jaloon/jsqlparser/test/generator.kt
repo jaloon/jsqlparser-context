@@ -1,13 +1,15 @@
-package io.github.jaloon.jsqlparser
+package io.github.jaloon.jsqlparser.test
 
 import net.sf.jsqlparser.expression.Expression
-import net.sf.jsqlparser.expression.operators.relational.ItemsList
+import net.sf.jsqlparser.statement.ParenthesedStatement
 import net.sf.jsqlparser.statement.Statement
+import net.sf.jsqlparser.statement.piped.PipeOperator
 import net.sf.jsqlparser.statement.select.FromItem
 import org.reflections.Reflections
 import org.reflections.scanners.Scanners
 import org.reflections.util.ConfigurationBuilder
 import java.util.jar.JarFile
+import kotlin.jvm.java
 
 fun main() {
 //    visitors()
@@ -81,9 +83,10 @@ fun getSubClass() {
         // .addScanners(Scanners.MethodsParameter, Scanners.MethodsSignature, Scanners.MethodsReturn, Scanners.ConstructorsParameter, Scanners.ConstructorsSignature)
     )
 //    reflections.getSubTypesOf(Expression::class.java)
-//    reflections.getSubTypesOf(ItemsList::class.java)
+//    reflections.getSubTypesOf(PipeOperator::class.java)
 //    reflections.getSubTypesOf(FromItem::class.java)
-    reflections.getSubTypesOf(Statement::class.java)
+//    reflections.getSubTypesOf(Statement::class.java)
+    reflections.getSubTypesOf(ParenthesedStatement::class.java)
         .map {
             it.simpleName
         }

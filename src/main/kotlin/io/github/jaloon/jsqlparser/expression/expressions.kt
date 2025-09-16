@@ -6,6 +6,7 @@ import io.github.jaloon.jsqlparser.expression.operators.accept
 import io.github.jaloon.jsqlparser.schema.accept
 import io.github.jaloon.jsqlparser.statement.accept
 import net.sf.jsqlparser.expression.*
+import net.sf.jsqlparser.expression.Function
 import net.sf.jsqlparser.expression.operators.arithmetic.*
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression
@@ -13,98 +14,117 @@ import net.sf.jsqlparser.expression.operators.conditional.XorExpression
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.schema.Column
 import net.sf.jsqlparser.statement.select.AllColumns
-import net.sf.jsqlparser.statement.select.AllTableColumns
-import net.sf.jsqlparser.statement.select.SubSelect
+import net.sf.jsqlparser.statement.select.Select
+import net.sf.jsqlparser.statement.select.TableFunction
+import net.sf.jsqlparser.util.cnfexpression.MultipleExpression
 
 fun Expression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     when (this) {
-        is Addition -> accept(visitor, context)
-        is AllColumns -> accept(visitor, context)
-        is AllTableColumns -> accept(visitor, context)
-        is AllValue -> accept(visitor, context)
-        is AnalyticExpression -> accept(visitor, context)
-        is AndExpression -> accept(visitor, context)
-        is AnyComparisonExpression -> accept(visitor, context)
-        is ArrayConstructor -> accept(visitor, context)
-        is ArrayExpression -> accept(visitor, context)
-        is Between -> accept(visitor, context)
-        is BitwiseAnd -> accept(visitor, context)
-        is BitwiseLeftShift -> accept(visitor, context)
-        is BitwiseOr -> accept(visitor, context)
-        is BitwiseRightShift -> accept(visitor, context)
-        is BitwiseXor -> accept(visitor, context)
-        is CaseExpression -> accept(visitor, context)
-        is CastExpression -> accept(visitor, context)
-        is CollateExpression -> accept(visitor, context)
-        is Column -> accept(visitor, context)
-        is Concat -> accept(visitor, context)
-        is ConnectByRootOperator -> accept(visitor, context)
-        is DateTimeLiteralExpression -> accept(visitor, context)
-        is DateValue -> accept(visitor, context)
-        is Division -> accept(visitor, context)
-        is DoubleValue -> accept(visitor, context)
-        is EqualsTo -> accept(visitor, context)
-        is ExistsExpression -> accept(visitor, context)
-        is ExtractExpression -> accept(visitor, context)
-        is FullTextSearch -> accept(visitor, context)
-        is net.sf.jsqlparser.expression.Function -> accept(visitor, context)
-        is GeometryDistance -> accept(visitor, context)
-        is GreaterThan -> accept(visitor, context)
-        is GreaterThanEquals -> accept(visitor, context)
-        is HexValue -> accept(visitor, context)
-        is InExpression -> accept(visitor, context)
-        is IntegerDivision -> accept(visitor, context)
-        is IntervalExpression -> accept(visitor, context)
-        is IsBooleanExpression -> accept(visitor, context)
-        is IsDistinctExpression -> accept(visitor, context)
-        is IsNullExpression -> accept(visitor, context)
-        is JdbcNamedParameter -> accept(visitor, context)
-        is JdbcParameter -> accept(visitor, context)
-        is JsonAggregateFunction -> accept(visitor, context)
-        is JsonExpression -> accept(visitor, context)
-        is JsonFunction -> accept(visitor, context)
-        is JsonOperator -> accept(visitor, context)
-        is KeepExpression -> accept(visitor, context)
-        is LikeExpression -> accept(visitor, context)
-        is LongValue -> accept(visitor, context)
-        is Matches -> accept(visitor, context)
-        is MinorThan -> accept(visitor, context)
-        is MinorThanEquals -> accept(visitor, context)
-        is Modulo -> accept(visitor, context)
-        is Multiplication -> accept(visitor, context)
-        is MySQLGroupConcat -> accept(visitor, context)
-        is NextValExpression -> accept(visitor, context)
-        is NotEqualsTo -> accept(visitor, context)
-        is NotExpression -> accept(visitor, context)
-        is NullValue -> accept(visitor, context)
-        is NumericBind -> accept(visitor, context)
-        is OrExpression -> accept(visitor, context)
-        is OracleHierarchicalExpression -> accept(visitor, context)
-        is OracleHint -> accept(visitor, context)
-        is OracleNamedFunctionParameter -> accept(visitor, context)
-        is OverlapsCondition -> accept(visitor, context)
-        is Parenthesis -> accept(visitor, context)
-        is RegExpMatchOperator -> accept(visitor, context)
-        is RegExpMySQLOperator -> accept(visitor, context)
-        is RowConstructor -> accept(visitor, context)
-        is RowGetExpression -> accept(visitor, context)
-        is SafeCastExpression -> accept(visitor, context)
-        is SignedExpression -> accept(visitor, context)
-        is SimilarToExpression -> accept(visitor, context)
-        is StringValue -> accept(visitor, context)
-        is SubSelect -> accept(visitor, context)
-        is Subtraction -> accept(visitor, context)
-        is TimeKeyExpression -> accept(visitor, context)
-        is TimeValue -> accept(visitor, context)
-        is TimestampValue -> accept(visitor, context)
-        is TimezoneExpression -> accept(visitor, context)
-        is TryCastExpression -> accept(visitor, context)
-        is UserVariable -> accept(visitor, context)
-        is ValueListExpression -> accept(visitor, context)
-        is VariableAssignment -> accept(visitor, context)
-        is WhenClause -> accept(visitor, context)
-        is XMLSerializeExpr -> accept(visitor, context)
-        is XorExpression -> accept(visitor, context)
+        is Addition                       -> accept(visitor, context)
+        is AllColumns                     -> accept(visitor, context)
+        is AllValue                       -> accept(visitor, context)
+        is AnalyticExpression             -> accept(visitor, context)
+        is AndExpression                  -> accept(visitor, context)
+        is AnyComparisonExpression        -> accept(visitor, context)
+        is ArrayConstructor               -> accept(visitor, context)
+        is ArrayExpression                -> accept(visitor, context)
+        is Between                        -> accept(visitor, context)
+        is BitwiseAnd                     -> accept(visitor, context)
+        is BitwiseLeftShift               -> accept(visitor, context)
+        is BitwiseOr                      -> accept(visitor, context)
+        is BitwiseRightShift              -> accept(visitor, context)
+        is BitwiseXor                     -> accept(visitor, context)
+        is BooleanValue                   -> accept(visitor, context)
+        is CaseExpression                 -> accept(visitor, context)
+        is CastExpression                 -> accept(visitor, context)
+        is CollateExpression              -> accept(visitor, context)
+        is Column                         -> accept(visitor, context)
+        is Concat                         -> accept(visitor, context)
+        is ConnectByPriorOperator         -> accept(visitor, context)
+        is ConnectByRootOperator          -> accept(visitor, context)
+        is ContainedBy                    -> accept(visitor, context)
+        is Contains                       -> accept(visitor, context)
+        is CosineSimilarity               -> accept(visitor, context)
+        is DateTimeLiteralExpression      -> accept(visitor, context)
+        is DateValue                      -> accept(visitor, context)
+        is Division                       -> accept(visitor, context)
+        is DoubleAnd                      -> accept(visitor, context)
+        is DoubleValue                    -> accept(visitor, context)
+        is EqualsTo                       -> accept(visitor, context)
+        is ExcludesExpression             -> accept(visitor, context)
+        is ExistsExpression               -> accept(visitor, context)
+        is ExpressionList<out Expression> -> accept(visitor, context)
+        is ExtractExpression              -> accept(visitor, context)
+        is FullTextSearch                 -> accept(visitor, context)
+        is Function                       -> accept(visitor, context)
+        is Function.HavingClause          -> accept(visitor, context)
+        is GeometryDistance               -> accept(visitor, context)
+        is GreaterThan                    -> accept(visitor, context)
+        is GreaterThanEquals              -> accept(visitor, context)
+        is HexValue                       -> accept(visitor, context)
+        is HighExpression                 -> accept(visitor, context)
+        is InExpression                   -> accept(visitor, context)
+        is IncludesExpression             -> accept(visitor, context)
+        is IntegerDivision                -> accept(visitor, context)
+        is IntervalExpression             -> accept(visitor, context)
+        is Inverse                        -> accept(visitor, context)
+        is IsBooleanExpression            -> accept(visitor, context)
+        is IsDistinctExpression           -> accept(visitor, context)
+        is IsNullExpression               -> accept(visitor, context)
+        is IsUnknownExpression            -> accept(visitor, context)
+        is JdbcNamedParameter             -> accept(visitor, context)
+        is JdbcParameter                  -> accept(visitor, context)
+        is JsonAggregateFunction          -> accept(visitor, context)
+        is JsonExpression                 -> accept(visitor, context)
+        is JsonFunction                   -> accept(visitor, context)
+        is JsonOperator                   -> accept(visitor, context)
+        is KeepExpression                 -> accept(visitor, context)
+        is LambdaExpression               -> accept(visitor, context)
+        is LikeExpression                 -> accept(visitor, context)
+        is LongValue                      -> accept(visitor, context)
+        is LowExpression                  -> accept(visitor, context)
+        is Matches                        -> accept(visitor, context)
+        is MemberOfExpression             -> accept(visitor, context)
+        is MinorThan                      -> accept(visitor, context)
+        is MinorThanEquals                -> accept(visitor, context)
+        is Modulo                         -> accept(visitor, context)
+        is MultipleExpression             -> accept(visitor, context)
+        is Multiplication                 -> accept(visitor, context)
+        is MySQLGroupConcat               -> accept(visitor, context)
+        is NextValExpression              -> accept(visitor, context)
+        is NotEqualsTo                    -> accept(visitor, context)
+        is NotExpression                  -> accept(visitor, context)
+        is NullValue                      -> accept(visitor, context)
+        is NumericBind                    -> accept(visitor, context)
+        is OrExpression                   -> accept(visitor, context)
+        is OracleHierarchicalExpression   -> accept(visitor, context)
+        is OracleHint                     -> accept(visitor, context)
+        is OracleNamedFunctionParameter   -> accept(visitor, context)
+        is OverlapsCondition              -> accept(visitor, context)
+        is Plus                           -> accept(visitor, context)
+        is PriorTo                        -> accept(visitor, context)
+        is RangeExpression                -> accept(visitor, context)
+        is RegExpMatchOperator            -> accept(visitor, context)
+        is RowGetExpression               -> accept(visitor, context)
+        is Select                         -> accept(visitor, context)
+        is SignedExpression               -> accept(visitor, context)
+        is SimilarToExpression            -> accept(visitor, context)
+        is StringValue                    -> accept(visitor, context)
+        is StructType                     -> accept(visitor, context)
+        is Subtraction                    -> accept(visitor, context)
+        is TSQLLeftJoin                   -> accept(visitor, context)
+        is TSQLRightJoin                  -> accept(visitor, context)
+        is TimeKeyExpression              -> accept(visitor, context)
+        is TimeValue                      -> accept(visitor, context)
+        is TimestampValue                 -> accept(visitor, context)
+        is TimezoneExpression             -> accept(visitor, context)
+        is TranscodingFunction            -> accept(visitor, context)
+        is TrimFunction                   -> accept(visitor, context)
+        is UserVariable                   -> accept(visitor, context)
+        is VariableAssignment             -> accept(visitor, context)
+        is WhenClause                     -> accept(visitor, context)
+        is XMLSerializeExpr               -> accept(visitor, context)
+        is XorExpression                  -> accept(visitor, context)
     }
 }
 
@@ -128,6 +148,10 @@ fun ArrayExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
+fun BooleanValue.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
 fun CaseExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
@@ -137,6 +161,10 @@ fun CastExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
 }
 
 fun CollateExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun ConnectByPriorOperator.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -160,7 +188,14 @@ fun ExtractExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
-fun net.sf.jsqlparser.expression.Function.accept(visitor: SqlContextVisitor, context: SqlContext) {
+fun Function.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    when (this) {
+        is TableFunction -> visitor.visit(this, context)
+        else             -> visitor.visit(this, context)
+    }
+}
+
+fun Function.HavingClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -168,7 +203,15 @@ fun HexValue.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
+fun HighExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
 fun IntervalExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun Inverse.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -200,7 +243,19 @@ fun KeepExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
+fun LambdaExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
 fun LongValue.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun LowExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun MultipleExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -240,19 +295,15 @@ fun OverlapsCondition.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
-fun Parenthesis.accept(visitor: SqlContextVisitor, context: SqlContext) {
+fun RangeExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
-fun RowConstructor.accept(visitor: SqlContextVisitor, context: SqlContext) {
+fun RowConstructor<out Expression?>.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
 fun RowGetExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
-    visitor.visit(this, context)
-}
-
-fun SafeCastExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -261,6 +312,10 @@ fun SignedExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
 }
 
 fun StringValue.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun StructType.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -280,15 +335,15 @@ fun TimezoneExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
-fun TryCastExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
+fun TranscodingFunction.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun TrimFunction.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
 fun UserVariable.accept(visitor: SqlContextVisitor, context: SqlContext) {
-    visitor.visit(this, context)
-}
-
-fun ValueListExpression.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -309,6 +364,10 @@ fun OrderByClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
 }
 
 fun PartitionByClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun PreferringClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 

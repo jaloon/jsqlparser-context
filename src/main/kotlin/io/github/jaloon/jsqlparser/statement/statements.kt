@@ -18,64 +18,79 @@ import net.sf.jsqlparser.statement.create.table.CreateTable
 import net.sf.jsqlparser.statement.create.view.AlterView
 import net.sf.jsqlparser.statement.create.view.CreateView
 import net.sf.jsqlparser.statement.delete.Delete
+import net.sf.jsqlparser.statement.delete.ParenthesedDelete
 import net.sf.jsqlparser.statement.drop.Drop
 import net.sf.jsqlparser.statement.execute.Execute
 import net.sf.jsqlparser.statement.grant.Grant
 import net.sf.jsqlparser.statement.insert.Insert
+import net.sf.jsqlparser.statement.insert.ParenthesedInsert
 import net.sf.jsqlparser.statement.merge.Merge
+import net.sf.jsqlparser.statement.refresh.RefreshMaterializedViewStatement
+import net.sf.jsqlparser.statement.select.LateralSubSelect
+import net.sf.jsqlparser.statement.select.ParenthesedSelect
 import net.sf.jsqlparser.statement.select.Select
 import net.sf.jsqlparser.statement.show.ShowIndexStatement
 import net.sf.jsqlparser.statement.show.ShowTablesStatement
 import net.sf.jsqlparser.statement.truncate.Truncate
+import net.sf.jsqlparser.statement.update.ParenthesedUpdate
 import net.sf.jsqlparser.statement.update.Update
 import net.sf.jsqlparser.statement.upsert.Upsert
-import net.sf.jsqlparser.statement.values.ValuesStatement
 
 fun Statement.accept(visitor: SqlContextVisitor, context: SqlContext) {
     when (this) {
-        is Alter -> accept(visitor, context)
-        is AlterSequence -> accept(visitor, context)
-        is AlterSession -> accept(visitor, context)
-        is AlterSystemStatement -> accept(visitor, context)
-        is AlterView -> accept(visitor, context)
-        is Analyze -> accept(visitor, context)
-        is Block -> accept(visitor, context)
-        is Comment -> accept(visitor, context)
-        is Commit -> accept(visitor, context)
-        is CreateFunctionalStatement -> accept(visitor, context)
-        is CreateIndex -> accept(visitor, context)
-        is CreateSchema -> accept(visitor, context)
-        is CreateSequence -> accept(visitor, context)
-        is CreateSynonym -> accept(visitor, context)
-        is CreateTable -> accept(visitor, context)
-        is CreateView -> accept(visitor, context)
-        is DeclareStatement -> accept(visitor, context)
-        is Delete -> accept(visitor, context)
-        is DescribeStatement -> accept(visitor, context)
-        is Drop -> accept(visitor, context)
-        is Execute -> accept(visitor, context)
-        is ExplainStatement -> accept(visitor, context)
-        is Grant -> accept(visitor, context)
-        is IfElseStatement -> accept(visitor, context)
-        is Insert -> accept(visitor, context)
-        is Merge -> accept(visitor, context)
-        is PurgeStatement -> accept(visitor, context)
-        is RenameTableStatement -> accept(visitor, context)
-        is ResetStatement -> accept(visitor, context)
-        is RollbackStatement -> accept(visitor, context)
-        is SavepointStatement -> accept(visitor, context)
-        is Select -> accept(visitor, context)
-        is SetStatement -> accept(visitor, context)
-        is ShowColumnsStatement -> accept(visitor, context)
-        is ShowIndexStatement -> accept(visitor, context)
-        is ShowStatement -> accept(visitor, context)
-        is ShowTablesStatement -> accept(visitor, context)
-        is Truncate -> accept(visitor, context)
-        is UnsupportedStatement -> accept(visitor, context)
-        is Update -> accept(visitor, context)
-        is Upsert -> accept(visitor, context)
-        is UseStatement -> accept(visitor, context)
-        is ValuesStatement -> accept(visitor, context)
+        is Alter                            -> accept(visitor, context)
+        is AlterSequence                    -> accept(visitor, context)
+        is AlterSession                     -> accept(visitor, context)
+        is AlterSystemStatement             -> accept(visitor, context)
+        is AlterView                        -> accept(visitor, context)
+        is Analyze                          -> accept(visitor, context)
+        is Block                            -> accept(visitor, context)
+        is Comment                          -> accept(visitor, context)
+        is Commit                           -> accept(visitor, context)
+        is CreateFunctionalStatement        -> accept(visitor, context)
+        is CreateIndex                      -> accept(visitor, context)
+        is CreateSchema                     -> accept(visitor, context)
+        is CreateSequence                   -> accept(visitor, context)
+        is CreateSynonym                    -> accept(visitor, context)
+        is CreateTable                      -> accept(visitor, context)
+        is CreateView                       -> accept(visitor, context)
+        is DeclareStatement                 -> accept(visitor, context)
+        is Delete                           -> accept(visitor, context)
+        is DescribeStatement                -> accept(visitor, context)
+        is Drop                             -> accept(visitor, context)
+        is Execute                          -> accept(visitor, context)
+        is ExplainStatement                 -> accept(visitor, context)
+        is Grant                            -> accept(visitor, context)
+        is IfElseStatement                  -> accept(visitor, context)
+        is Insert                           -> accept(visitor, context)
+        is Merge                            -> accept(visitor, context)
+        is PurgeStatement                   -> accept(visitor, context)
+        is RefreshMaterializedViewStatement -> accept(visitor, context)
+        is RenameTableStatement             -> accept(visitor, context)
+        is ResetStatement                   -> accept(visitor, context)
+        is RollbackStatement                -> accept(visitor, context)
+        is SavepointStatement               -> accept(visitor, context)
+        is Select                           -> accept(visitor, context)
+        is SetStatement                     -> accept(visitor, context)
+        is ShowColumnsStatement             -> accept(visitor, context)
+        is ShowIndexStatement               -> accept(visitor, context)
+        is ShowStatement                    -> accept(visitor, context)
+        is ShowTablesStatement              -> accept(visitor, context)
+        is Truncate                         -> accept(visitor, context)
+        is UnsupportedStatement             -> accept(visitor, context)
+        is Update                           -> accept(visitor, context)
+        is Upsert                           -> accept(visitor, context)
+        is UseStatement                     -> accept(visitor, context)
+    }
+}
+
+fun ParenthesedStatement.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    when (this) {
+        is LateralSubSelect  -> visitor.visit(this) { context.replace(it as LateralSubSelect?) }
+        is ParenthesedDelete -> visitor.visit(this) { context.replace(it as ParenthesedDelete?) }
+        is ParenthesedInsert -> visitor.visit(this) { context.replace(it as ParenthesedInsert?) }
+        is ParenthesedSelect -> visitor.visit(this) { context.replace(it as ParenthesedSelect?) }
+        is ParenthesedUpdate -> visitor.visit(this) { context.replace(it as ParenthesedUpdate?) }
     }
 }
 
@@ -92,6 +107,10 @@ fun CreateFunctionalStatement.accept(visitor: SqlContextVisitor, context: SqlCon
 }
 
 fun DeclareStatement.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun DeclareStatement.TypeDefExpr.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
 
@@ -148,5 +167,9 @@ fun UseStatement.accept(visitor: SqlContextVisitor, context: SqlContext) {
 }
 
 fun OutputClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}
+
+fun ReturningClause.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }

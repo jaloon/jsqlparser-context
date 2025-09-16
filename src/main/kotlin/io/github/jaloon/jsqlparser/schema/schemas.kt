@@ -11,3 +11,7 @@ fun Column.accept(visitor: SqlContextVisitor, context: SqlContext) {
 fun Table.accept(visitor: SqlContextVisitor, context: SqlContext) {
     visitor.visit(this, context)
 }
+
+fun Partition.accept(visitor: SqlContextVisitor, context: SqlContext) {
+    visitor.visit(this, context)
+}

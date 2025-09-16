@@ -3,6 +3,7 @@ package io.github.jaloon.jsqlparser
 import io.github.jaloon.jsqlparser.expression.SimpleExpression
 import io.github.jaloon.jsqlparser.expression.accept
 import io.github.jaloon.jsqlparser.expression.operators.accept
+import io.github.jaloon.jsqlparser.schema.accept
 import io.github.jaloon.jsqlparser.statement.accept
 import net.sf.jsqlparser.expression.*
 import net.sf.jsqlparser.expression.Function
@@ -12,6 +13,7 @@ import net.sf.jsqlparser.expression.operators.conditional.OrExpression
 import net.sf.jsqlparser.expression.operators.conditional.XorExpression
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.schema.Column
+import net.sf.jsqlparser.schema.Partition
 import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.*
 import net.sf.jsqlparser.statement.alter.Alter
@@ -25,177 +27,144 @@ import net.sf.jsqlparser.statement.create.index.CreateIndex
 import net.sf.jsqlparser.statement.create.schema.CreateSchema
 import net.sf.jsqlparser.statement.create.sequence.CreateSequence
 import net.sf.jsqlparser.statement.create.synonym.CreateSynonym
+import net.sf.jsqlparser.statement.create.table.ColumnDefinition
 import net.sf.jsqlparser.statement.create.table.CreateTable
+import net.sf.jsqlparser.statement.create.table.Index
 import net.sf.jsqlparser.statement.create.view.AlterView
 import net.sf.jsqlparser.statement.create.view.CreateView
 import net.sf.jsqlparser.statement.delete.Delete
+import net.sf.jsqlparser.statement.delete.ParenthesedDelete
 import net.sf.jsqlparser.statement.drop.Drop
 import net.sf.jsqlparser.statement.execute.Execute
 import net.sf.jsqlparser.statement.grant.Grant
 import net.sf.jsqlparser.statement.insert.Insert
 import net.sf.jsqlparser.statement.insert.InsertConflictAction
 import net.sf.jsqlparser.statement.insert.InsertConflictTarget
+import net.sf.jsqlparser.statement.insert.ParenthesedInsert
 import net.sf.jsqlparser.statement.merge.Merge
+import net.sf.jsqlparser.statement.merge.MergeDelete
 import net.sf.jsqlparser.statement.merge.MergeInsert
 import net.sf.jsqlparser.statement.merge.MergeUpdate
+import net.sf.jsqlparser.statement.piped.*
+import net.sf.jsqlparser.statement.refresh.RefreshMaterializedViewStatement
 import net.sf.jsqlparser.statement.select.*
 import net.sf.jsqlparser.statement.show.ShowIndexStatement
 import net.sf.jsqlparser.statement.show.ShowTablesStatement
 import net.sf.jsqlparser.statement.truncate.Truncate
+import net.sf.jsqlparser.statement.update.ParenthesedUpdate
 import net.sf.jsqlparser.statement.update.Update
 import net.sf.jsqlparser.statement.update.UpdateSet
 import net.sf.jsqlparser.statement.upsert.Upsert
-import net.sf.jsqlparser.statement.values.ValuesStatement
+import net.sf.jsqlparser.util.cnfexpression.MultipleExpression
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.function.BiConsumer
+import java.util.function.Consumer
+import java.util.function.Supplier
 
 /**
  * SQL上下文访问器适配器
  * @author jaloon
- * @since 4.6
  */
 @Suppress("UNCHECKED_CAST")
 open class SqlContextVisitorAdapter : SqlContextVisitor {
-    protected fun visitBinaryExpression(expr: BinaryExpression?, context: SqlContext): Boolean {
-        val changed = AtomicBoolean()
-        expr?.leftExpression?.accept(this) {
+
+    // -------------------------- visitor tool functions begin --------------------------
+
+    protected fun <T> visitSingle(context: SqlContext,
+                                  getter: Supplier<T>,
+                                  setter: Consumer<T>,
+                                  accept: BiConsumer<T, SqlContext>
+    ): Boolean {
+        val del = AtomicBoolean()
+        accept.accept(getter.get()) {
             if (it == null) {
-                context.replace(expr.rightExpression)
-                changed.set(true)
+                context.remove()
+                del.set(true)
             } else {
-                expr.leftExpression = it as Expression
+                setter.accept(it as T)
             }
         }
-        expr?.rightExpression?.accept(this) {
+        return del.get()
+    }
+
+    protected fun <T : Statement?> visitSingleStatement(context: SqlContext,
+                                                        getter: Supplier<T>,
+                                                        setter: Consumer<T>
+    ) = visitSingle(context, getter, setter) { it, cxt -> it?.accept(this, cxt) }
+
+    protected fun <T : Expression?> visitSingleExpression(context: SqlContext,
+                                                          getter: Supplier<T>,
+                                                          setter: Consumer<T>
+    ) = visitSingle(context, getter, setter) { it, cxt -> it?.accept(this, cxt) }
+
+    protected fun <T : FromItem?> visitSingleFromItem(context: SqlContext,
+                                                      getter: Supplier<T>,
+                                                      setter: Consumer<T>
+    ) = visitSingle(context, getter, setter) { it, cxt -> it?.accept(this, cxt) }
+
+    protected fun visitPairExpression(context: SqlContext,
+                                      getLeft: Supplier<Expression?>,
+                                      getRight: Supplier<Expression?>,
+                                      setLeft: Consumer<Expression?>,
+                                      setRight: Consumer<Expression?>
+    ): Boolean {
+        val changed = AtomicBoolean()
+        getLeft.get()?.accept(this) {
+            if (it == null) {
+                context.replace(getRight.get())
+                changed.set(true)
+            } else {
+                setLeft.accept(it as Expression)
+            }
+        }
+        getRight.get()?.accept(this) {
             if (changed.get()) {
                 context.replace(it)
             } else if (it == null) {
-                context.replace(expr.leftExpression)
+                context.replace(getLeft.get())
                 changed.set(true)
             } else {
-                expr.rightExpression = it as Expression
+                setRight.accept(it as Expression)
             }
         }
         return changed.get()
     }
 
+    protected fun visitBinaryExpression(expr: BinaryExpression?, context: SqlContext) = visitPairExpression(
+        context,
+        { expr?.leftExpression },
+        { expr?.rightExpression },
+        { expr?.leftExpression = it },
+        { expr?.rightExpression = it }
+    )
+
+    protected fun <T> visitList(list: MutableList<T>?, accept: BiConsumer<T, SqlContext>) {
+        list ?: return
+        for (i in list.indices.reversed()) {
+            accept.accept(list[i]) {
+                if (it == null) {
+                    list.removeAt(i)
+                } else {
+                    list[i] = it as T
+                }
+            }
+        }
+    }
+
     protected fun <T : Expression> visitExpressions(expressions: MutableList<T>?) {
-        expressions ?: return
-        for (i in expressions.indices.reversed()) {
-            expressions[i].accept(this) {
-                if (it == null) {
-                    expressions.removeAt(i)
-                } else {
-                    expressions[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun <T : Statement> visitStatements(statements: MutableList<T>?) {
-        statements ?: return
-        for (i in statements.indices.reversed()) {
-            statements[i].accept(this) {
-                if (it == null) {
-                    statements.removeAt(i)
-                } else {
-                    statements[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun <T : ItemsList> visitItemsLists(lists: MutableList<T>?) {
-        lists ?: return
-        for (i in lists.indices.reversed()) {
-            lists[i].accept(this) {
-                if (it == null) {
-                    lists.removeAt(i)
-                } else {
-                    lists[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun <T : FromItem> visitFromItems(fromItems: MutableList<T>?) {
-        fromItems ?: return
-        for (i in fromItems.indices.reversed()) {
-            fromItems[i].accept(this) {
-                if (it == null) {
-                    fromItems.removeAt(i)
-                } else {
-                    fromItems[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun <T : SelectBody> visitSelectBodies(selectBodies: MutableList<T>?) {
-        selectBodies ?: return
-        for (i in selectBodies.indices.reversed()) {
-            selectBodies[i].accept(this) {
-                if (it == null) {
-                    selectBodies.removeAt(i)
-                } else {
-                    selectBodies[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun <T : SelectItem> visitSelectItems(selectItems: MutableList<T>?) {
-        selectItems ?: return
-        for (i in selectItems.indices.reversed()) {
-            selectItems[i].accept(this) {
-                if (it == null) {
-                    selectItems.removeAt(i)
-                } else {
-                    selectItems[i] = it as T
-                }
-            }
-        }
-    }
-
-    protected fun visitJoins(joins: MutableList<Join>?) {
-        joins ?: return
-        for (i in joins.indices.reversed()) {
-            joins[i].accept(this) {
-                if (it == null) {
-                    joins.removeAt(i)
-                } else {
-                    joins[i] = it as Join
-                }
-            }
-        }
-    }
-
-    protected fun visitUpdateSets(updateSets: MutableList<UpdateSet>?) {
-        updateSets ?: return
-        for (i in updateSets.indices.reversed()) {
-            updateSets[i].accept(this) {
-                if (it == null) {
-                    updateSets.removeAt(i)
-                } else {
-                    updateSets[i] = it as UpdateSet
-                }
-            }
-        }
+        visitList(expressions) { it, cxt -> it.accept(this, cxt) }
     }
 
     protected fun visitOrderByElements(orderByElements: MutableList<OrderByElement>?) {
-        orderByElements ?: return
-        for (i in orderByElements.indices.reversed()) {
-            orderByElements[i].accept(this) {
-                if (it == null) {
-                    orderByElements.removeAt(i)
-                } else {
-                    orderByElements[i] = it as OrderByElement
-                }
-            }
-        }
+        visitList(orderByElements) { it, cxt -> it.accept(this, cxt) }
     }
+
+    // -------------------------- visitor tool functions end --------------------------
+
+
+    // -------------------------- expression visitor begin --------------------------
 
     override fun visit(bitwiseRightShift: BitwiseRightShift?, context: SqlContext) {
         visitBinaryExpression(bitwiseRightShift, context)
@@ -205,11 +174,22 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         visitBinaryExpression(bitwiseLeftShift, context)
     }
 
-    override fun visit(nullValue: NullValue?, context: SqlContext) {}
+    override fun visit(nullValue: NullValue?, context: SqlContext) {
+
+    }
+
     override fun visit(function: Function?, context: SqlContext) {
-        function?.parameters?.accept(this) { function.parameters = it as ExpressionList? }
-        function?.keep?.accept(this) { function.keep = it as KeepExpression? }
-        visitOrderByElements(function?.orderByElements)
+        function ?: return
+        function.parameters?.accept(this) { function.parameters = it as ExpressionList<*>? }
+        function.namedParameters?.accept(this) { function.namedParameters = it as NamedExpressionList<*>? }
+        function.havingClause?.accept(this) { function.havingClause = it as Function.HavingClause? }
+        function.limit?.accept(this) { function.limit = it as Limit? }
+        function.keep?.accept(this) { function.keep = it as KeepExpression? }
+        when (val attribute = function.attribute) {
+            is Column     -> attribute.accept(this) { function.setAttribute(it as Column?) }
+            is Expression -> attribute.accept(this) { function.setAttribute(it as Expression?) }
+        }
+        visitOrderByElements(function.orderByElements)
     }
 
     override fun visit(signedExpression: SignedExpression?, context: SqlContext) {
@@ -218,25 +198,46 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         }
     }
 
-    override fun visit(jdbcParameter: JdbcParameter?, context: SqlContext) {}
-    override fun visit(jdbcNamedParameter: JdbcNamedParameter?, context: SqlContext) {}
-    override fun visit(doubleValue: DoubleValue?, context: SqlContext) {}
-    override fun visit(longValue: LongValue?, context: SqlContext) {}
-    override fun visit(hexValue: HexValue?, context: SqlContext) {}
-    override fun visit(dateValue: DateValue?, context: SqlContext) {}
-    override fun visit(timeValue: TimeValue?, context: SqlContext) {}
-    override fun visit(timestampValue: TimestampValue?, context: SqlContext) {}
-    override fun visit(parenthesis: Parenthesis?, context: SqlContext) {
-        parenthesis?.expression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                parenthesis.expression = it as Expression
-            }
-        }
+    override fun visit(jdbcParameter: JdbcParameter?, context: SqlContext) {
+
     }
 
-    override fun visit(stringValue: StringValue?, context: SqlContext) {}
+    override fun visit(jdbcNamedParameter: JdbcNamedParameter?, context: SqlContext) {
+
+    }
+
+    override fun visit(doubleValue: DoubleValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(longValue: LongValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(hexValue: HexValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(dateValue: DateValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(timeValue: TimeValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(timestampValue: TimestampValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(stringValue: StringValue?, context: SqlContext) {
+
+    }
+
+    override fun visit(booleanValue: BooleanValue?, context: SqlContext) {
+
+    }
+
     override fun visit(addition: Addition?, context: SqlContext) {
         visitBinaryExpression(addition, context)
     }
@@ -276,19 +277,20 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(overlapsCondition: OverlapsCondition?, context: SqlContext) {
+        overlapsCondition ?: return
         val del = AtomicBoolean()
         val ref = AtomicReference<OverlapsCondition?>()
-        overlapsCondition?.left?.accept(this) {
+        overlapsCondition.left?.accept(this) {
             if (it == null) {
                 context.replace(overlapsCondition.right)
                 del.set(true)
             } else {
-                val condition = OverlapsCondition(it as ExpressionList, overlapsCondition.right)
+                val condition = OverlapsCondition(it as ExpressionList<*>, overlapsCondition.right)
                 context.replace(condition)
                 ref.set(condition)
             }
         }
-        overlapsCondition?.right?.accept(this) {
+        overlapsCondition.right?.accept(this) {
             if (del.get()) {
                 context.replace(it)
             } else {
@@ -296,7 +298,7 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
                 if (it == null) {
                     context.replace(left)
                 } else {
-                    context.replace(OverlapsCondition(left, it as ExpressionList))
+                    context.replace(OverlapsCondition(left, it as ExpressionList<*>))
                 }
             }
         }
@@ -315,43 +317,68 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(inExpression: InExpression?, context: SqlContext) {
-        inExpression?.leftExpression?.accept(this) { inExpression.leftExpression = it as Expression? }
-        if (inExpression?.rightExpression != null) {
-            inExpression.rightExpression.accept(this) { inExpression.rightExpression = it as Expression? }
-        } else if (inExpression?.rightItemsList != null) {
-            inExpression.rightItemsList.accept(this) { inExpression.rightItemsList = it as ExpressionList? }
-        }
+        visitPairExpression(
+            context,
+            { inExpression?.leftExpression },
+            { inExpression?.rightExpression },
+            { inExpression?.leftExpression = it },
+            { inExpression?.rightExpression = it }
+        )
+    }
+
+    override fun visit(includesExpression: IncludesExpression?, context: SqlContext) {
+        visitPairExpression(
+            context,
+            { includesExpression?.leftExpression },
+            { includesExpression?.rightExpression },
+            { includesExpression?.leftExpression = it },
+            { includesExpression?.rightExpression = it }
+        )
+    }
+
+    override fun visit(excludesExpression: ExcludesExpression?, context: SqlContext) {
+        visitPairExpression(
+            context,
+            { excludesExpression?.leftExpression },
+            { excludesExpression?.rightExpression },
+            { excludesExpression?.leftExpression = it },
+            { excludesExpression?.rightExpression = it }
+        )
     }
 
     override fun visit(fullTextSearch: FullTextSearch?, context: SqlContext) {
+        fullTextSearch?.matchColumns?.accept(this) { fullTextSearch.matchColumns = it as ExpressionList<Column>? }
         fullTextSearch?.againstValue?.accept(this) {
             when (it) {
-                is StringValue -> fullTextSearch.setAgainstValue(it)
+                is StringValue        -> fullTextSearch.setAgainstValue(it)
                 is JdbcNamedParameter -> fullTextSearch.setAgainstValue(it)
-                is JdbcParameter -> fullTextSearch.setAgainstValue(it)
+                is JdbcParameter      -> fullTextSearch.setAgainstValue(it)
             }
         }
-        visitExpressions<Column>(fullTextSearch?.matchColumns)
     }
 
     override fun visit(isNullExpression: IsNullExpression?, context: SqlContext) {
-        isNullExpression?.leftExpression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                isNullExpression.leftExpression = it as Expression
-            }
-        }
+        visitSingleExpression(
+            context,
+            { isNullExpression?.leftExpression },
+            { isNullExpression?.leftExpression = it }
+        )
     }
 
     override fun visit(isBooleanExpression: IsBooleanExpression?, context: SqlContext) {
-        isBooleanExpression?.leftExpression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                isBooleanExpression.leftExpression = it as Expression
-            }
-        }
+        visitSingleExpression(
+            context,
+            { isBooleanExpression?.leftExpression },
+            { isBooleanExpression?.leftExpression = it }
+        )
+    }
+
+    override fun visit(isUnknownExpression: IsUnknownExpression?, context: SqlContext) {
+        visitSingleExpression(
+            context,
+            { isUnknownExpression?.leftExpression },
+            { isUnknownExpression?.leftExpression = it }
+        )
     }
 
     override fun visit(likeExpression: LikeExpression?, context: SqlContext) {
@@ -372,92 +399,20 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         visitBinaryExpression(notEqualsTo, context)
     }
 
+    override fun visit(doubleAnd: DoubleAnd?, context: SqlContext) {
+        visitBinaryExpression(doubleAnd, context)
+    }
+
+    override fun visit(contains: Contains?, context: SqlContext) {
+        visitBinaryExpression(contains, context)
+    }
+
+    override fun visit(containedBy: ContainedBy?, context: SqlContext) {
+        visitBinaryExpression(containedBy, context)
+    }
+
     override fun visit(column: Column?, context: SqlContext) {
-        column?.table?.accept(this) { column.table = it as Table? }
-    }
 
-    override fun visit(table: Table?, context: SqlContext) {
-        table?.pivot?.accept(this) { table.pivot = it as Pivot? }
-        table?.unPivot?.accept(this) { table.unPivot = it as UnPivot? }
-    }
-
-    override fun visit(subSelect: SubSelect?, context: SqlContext) {
-        subSelect?.selectBody?.accept(this) { subSelect.selectBody = it as SelectBody? }
-        subSelect?.pivot?.accept(this) { subSelect.pivot = it as Pivot? }
-        visitSelectBodies<WithItem>(subSelect?.withItemsList)
-    }
-
-    override fun visit(subJoin: SubJoin?, context: SqlContext) {
-        subJoin?.left?.accept(this) { subJoin.left = it as FromItem? }
-        visitJoins(subJoin?.joinList)
-    }
-
-    override fun visit(join: Join?, context: SqlContext) {
-        join?.rightItem?.accept(this) { join.rightItem = it as FromItem? }
-        visitExpressions(join?.onExpressions as LinkedList<Expression>?)
-        visitExpressions<Column>(join?.usingColumns)
-    }
-
-    override fun visit(lateralSubSelect: LateralSubSelect?, context: SqlContext) {
-        val removed = AtomicBoolean()
-        lateralSubSelect?.subSelect?.accept(this) {
-            if (it == null) {
-                context.remove()
-                removed.set(true)
-            } else {
-                lateralSubSelect.subSelect = it as SubSelect
-            }
-        }
-        if (!removed.get()) {
-            lateralSubSelect?.pivot?.accept(this) { lateralSubSelect.pivot = it as Pivot? }
-            lateralSubSelect?.unPivot?.accept(this) { lateralSubSelect.unPivot = it as UnPivot? }
-        }
-    }
-
-    override fun visit(valuesList: ValuesList?, context: SqlContext) {
-        valuesList?.multiExpressionList?.accept(this) {
-            if (it == null) {
-                valuesList.multiExpressionList.expressionLists.clear()
-            } else {
-                valuesList.multiExpressionList = it as MultiExpressionList
-            }
-        }
-    }
-
-    override fun visit(tableFunction: TableFunction?, context: SqlContext) {
-        tableFunction?.function?.accept(this) { tableFunction.function = it as Function? }
-    }
-
-    override fun visit(parenthesisFromItem: ParenthesisFromItem?, context: SqlContext) {
-        parenthesisFromItem?.fromItem?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                parenthesisFromItem.fromItem = it as FromItem
-            }
-        }
-    }
-
-    override fun visit(expressionList: ExpressionList?, context: SqlContext) {
-        visitExpressions(expressionList?.expressions)
-    }
-
-    override fun visit(expressionListItem: ExpressionListItem?, context: SqlContext) {
-        expressionListItem?.expressionList?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                expressionListItem.expressionList = it as ExpressionList
-            }
-        }
-    }
-
-    override fun visit(namedExpressionList: NamedExpressionList?, context: SqlContext) {
-        visitExpressions(namedExpressionList?.expressions)
-    }
-
-    override fun visit(multiExpressionList: MultiExpressionList?, context: SqlContext) {
-        visitItemsLists<ExpressionList>(multiExpressionList?.expressionLists)
     }
 
     override fun visit(caseExpression: CaseExpression?, context: SqlContext) {
@@ -467,28 +422,36 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(whenClause: WhenClause?, context: SqlContext) {
-        whenClause?.whenExpression?.accept(this) { whenClause.whenExpression = it as Expression? }
-        whenClause?.thenExpression?.accept(this) { whenClause.thenExpression = it as Expression? }
+        visitPairExpression(
+            context,
+            { whenClause?.whenExpression },
+            { whenClause?.thenExpression },
+            { whenClause?.whenExpression = it },
+            { whenClause?.thenExpression = it }
+        )
     }
 
     override fun visit(existsExpression: ExistsExpression?, context: SqlContext) {
-        existsExpression?.rightExpression?.accept(this) { existsExpression.rightExpression = it as Expression? }
+        visitSingleExpression(
+            context,
+            { existsExpression?.rightExpression },
+            { existsExpression?.rightExpression = it }
+        )
+    }
+
+    override fun visit(memberOfExpression: MemberOfExpression?, context: SqlContext) {
+        visitPairExpression(
+            context,
+            { memberOfExpression?.leftExpression },
+            { memberOfExpression?.rightExpression },
+            { memberOfExpression?.leftExpression = it },
+            { memberOfExpression?.rightExpression = it }
+        )
     }
 
     override fun visit(anyComparisonExpression: AnyComparisonExpression?, context: SqlContext) {
-        val ref = AtomicReference<SubSelect?>(anyComparisonExpression?.subSelect)
-        anyComparisonExpression?.subSelect?.accept(this) {
-            ref.set(it as SubSelect?)
-            context.replace(AnyComparisonExpression(anyComparisonExpression.anyType, it))
-        }
-        if (ref.get() == null) {
-            anyComparisonExpression?.itemsList?.accept(this) {
-                if (it == null) {
-                    context.remove()
-                } else {
-                    context.replace(AnyComparisonExpression(anyComparisonExpression.anyType, it as ItemsList))
-                }
-            }
+        visitSingleExpression<Select?>(context, { anyComparisonExpression?.select }) {
+            context.replace(AnyComparisonExpression(anyComparisonExpression?.anyType, it))
         }
     }
 
@@ -513,18 +476,11 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(castExpression: CastExpression?, context: SqlContext) {
-        castExpression?.leftExpression?.accept(this) { castExpression.leftExpression = it as Expression? }
-        castExpression?.rowConstructor?.accept(this) { castExpression.rowConstructor = it as RowConstructor? }
-    }
-
-    override fun visit(tryCastExpression: TryCastExpression?, context: SqlContext) {
-        tryCastExpression?.leftExpression?.accept(this) { tryCastExpression.leftExpression = it as Expression? }
-        tryCastExpression?.rowConstructor?.accept(this) { tryCastExpression.rowConstructor = it as RowConstructor? }
-    }
-
-    override fun visit(safeCastExpression: SafeCastExpression?, context: SqlContext) {
-        safeCastExpression?.leftExpression?.accept(this) { safeCastExpression.leftExpression = it as Expression? }
-        safeCastExpression?.rowConstructor?.accept(this) { safeCastExpression.rowConstructor = it as RowConstructor? }
+        visitSingleExpression(
+            context,
+            { castExpression?.leftExpression },
+            { castExpression?.leftExpression = it }
+        )
     }
 
     override fun visit(modulo: Modulo?, context: SqlContext) {
@@ -532,19 +488,30 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(analyticExpression: AnalyticExpression?, context: SqlContext) {
-        analyticExpression?.expression?.accept(this) { analyticExpression.expression = it as Expression? }
-        analyticExpression?.defaultValue?.accept(this) { analyticExpression.defaultValue = it as Expression? }
-        analyticExpression?.offset?.accept(this) { analyticExpression.offset = it as Expression? }
-        analyticExpression?.keep?.accept(this) { analyticExpression.keep = it as KeepExpression? }
-        analyticExpression?.filterExpression?.accept(this) { analyticExpression.filterExpression = it as Expression? }
-        visitOrderByElements(analyticExpression?.funcOrderBy)
-        analyticExpression?.windowDefinition?.accept(this) {
+        analyticExpression ?: return
+        analyticExpression.expression?.accept(this) { analyticExpression.expression = it as Expression? }
+        analyticExpression.offset?.accept(this) { analyticExpression.offset = it as Expression? }
+        analyticExpression.defaultValue?.accept(this) { analyticExpression.defaultValue = it as Expression? }
+        analyticExpression.keep?.accept(this) { analyticExpression.keep = it as KeepExpression? }
+        analyticExpression.filterExpression?.accept(this) {
+            analyticExpression.filterExpression = it as Expression?
+        }
+        visitOrderByElements(analyticExpression.funcOrderBy)
+        analyticExpression.windowDefinition?.accept(this) {
             analyticExpression.windowDefinition = it as WindowDefinition?
         }
+        analyticExpression.havingClause?.accept(this) {
+            analyticExpression.havingClause = it as Function.HavingClause?
+        }
+        analyticExpression.limit?.accept(this) { analyticExpression.limit = it as Limit? }
     }
 
     override fun visit(extractExpression: ExtractExpression?, context: SqlContext) {
-        extractExpression?.expression?.accept(this) { extractExpression.expression = it as Expression? }
+        visitSingleExpression(
+            context,
+            { extractExpression?.expression },
+            { extractExpression?.expression = it }
+        )
     }
 
     override fun visit(intervalExpression: IntervalExpression?, context: SqlContext) {
@@ -552,12 +519,13 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(oracleHierarchicalExpression: OracleHierarchicalExpression?, context: SqlContext) {
-        oracleHierarchicalExpression?.startExpression?.accept(this) {
-            oracleHierarchicalExpression.startExpression = it as Expression?
-        }
-        oracleHierarchicalExpression?.connectExpression?.accept(this) {
-            oracleHierarchicalExpression.connectExpression = it as Expression?
-        }
+        visitPairExpression(
+            context,
+            { oracleHierarchicalExpression?.startExpression },
+            { oracleHierarchicalExpression?.connectExpression },
+            { oracleHierarchicalExpression?.startExpression = it },
+            { oracleHierarchicalExpression?.connectExpression = it }
+        )
     }
 
     override fun visit(regExpMatchOperator: RegExpMatchOperator?, context: SqlContext) {
@@ -572,55 +540,72 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         visitBinaryExpression(jsonOperator, context)
     }
 
-    override fun visit(regExpMySQLOperator: RegExpMySQLOperator?, context: SqlContext) {
-        visitBinaryExpression(regExpMySQLOperator, context)
+    override fun visit(userVariable: UserVariable?, context: SqlContext) {
+
     }
 
-    override fun visit(userVariable: UserVariable?, context: SqlContext) {}
-    override fun visit(numericBind: NumericBind?, context: SqlContext) {}
+    override fun visit(numericBind: NumericBind?, context: SqlContext) {
+
+    }
+
     override fun visit(keepExpression: KeepExpression?, context: SqlContext) {
         visitOrderByElements(keepExpression?.orderByElements)
     }
 
     override fun visit(mySQLGroupConcat: MySQLGroupConcat?, context: SqlContext) {
-        mySQLGroupConcat?.expressionList?.accept(this) { mySQLGroupConcat.expressionList = it as ExpressionList? }
+        mySQLGroupConcat?.expressionList?.accept(this) { mySQLGroupConcat.expressionList = it as ExpressionList<*>? }
         visitOrderByElements(mySQLGroupConcat?.orderByElements)
     }
 
-    override fun visit(valueListExpression: ValueListExpression?, context: SqlContext) {
-        valueListExpression?.expressionList?.accept(this) { valueListExpression.expressionList = it as ExpressionList? }
+    override fun visit(expressionList: ExpressionList<out Expression?>?, context: SqlContext) {
+        visitExpressions(expressionList)
+        if (expressionList.isNullOrEmpty()) {
+            context.remove()
+        }
     }
 
-    override fun visit(rowConstructor: RowConstructor?, context: SqlContext) {
-        rowConstructor?.exprList?.accept(this) { rowConstructor.exprList = it as ExpressionList? }
+    override fun visit(rowConstructor: RowConstructor<out Expression?>?, context: SqlContext) {
+        visit(rowConstructor as ExpressionList<out Expression?>?, context)
     }
 
     override fun visit(rowGetExpression: RowGetExpression?, context: SqlContext) {
-        rowGetExpression?.expression?.accept(this) { rowGetExpression.expression = it as Expression? }
+        visitSingleExpression(
+            context,
+            { rowGetExpression?.expression },
+            { rowGetExpression?.expression = it }
+        )
     }
 
-    override fun visit(oracleHint: OracleHint?, context: SqlContext) {}
-    override fun visit(timeKeyExpression: TimeKeyExpression?, context: SqlContext) {}
-    override fun visit(dateTimeLiteralExpression: DateTimeLiteralExpression?, context: SqlContext) {}
+    override fun visit(oracleHint: OracleHint?, context: SqlContext) {
+
+    }
+
+    override fun visit(timeKeyExpression: TimeKeyExpression?, context: SqlContext) {
+
+    }
+
+    override fun visit(dateTimeLiteralExpression: DateTimeLiteralExpression?, context: SqlContext) {
+
+    }
+
     override fun visit(notExpression: NotExpression?, context: SqlContext) {
-        notExpression?.expression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                notExpression.expression = it as Expression
-            }
-        }
+        visitSingleExpression(
+            context,
+            { notExpression?.expression },
+            { notExpression?.expression = it }
+        )
     }
 
-    override fun visit(nextValExpression: NextValExpression?, context: SqlContext) {}
+    override fun visit(nextValExpression: NextValExpression?, context: SqlContext) {
+
+    }
+
     override fun visit(collateExpression: CollateExpression?, context: SqlContext) {
-        collateExpression?.leftExpression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                collateExpression.leftExpression = it as Expression
-            }
-        }
+        visitSingleExpression(
+            context,
+            { collateExpression?.leftExpression },
+            { collateExpression?.leftExpression = it }
+        )
     }
 
     override fun visit(similarToExpression: SimilarToExpression?, context: SqlContext) {
@@ -628,14 +613,18 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(arrayExpression: ArrayExpression?, context: SqlContext) {
-        arrayExpression?.objExpression?.accept(this) { arrayExpression.objExpression = it as Expression? }
-        arrayExpression?.indexExpression?.accept(this) { arrayExpression.indexExpression = it as Expression? }
-        arrayExpression?.startIndexExpression?.accept(this) { arrayExpression.startIndexExpression = it as Expression? }
-        arrayExpression?.stopIndexExpression?.accept(this) { arrayExpression.stopIndexExpression = it as Expression? }
+        arrayExpression ?: return
+        arrayExpression.objExpression?.accept(this) { arrayExpression.objExpression = it as Expression? }
+        arrayExpression.indexExpression?.accept(this) { arrayExpression.indexExpression = it as Expression? }
+        arrayExpression.startIndexExpression?.accept(this) { arrayExpression.startIndexExpression = it as Expression? }
+        arrayExpression.stopIndexExpression?.accept(this) { arrayExpression.stopIndexExpression = it as Expression? }
     }
 
     override fun visit(arrayConstructor: ArrayConstructor?, context: SqlContext) {
         visitExpressions(arrayConstructor?.expressions)
+        if (arrayConstructor?.expressions.isNullOrEmpty()) {
+            context.remove()
+        }
     }
 
     override fun visit(variableAssignment: VariableAssignment?, context: SqlContext) {
@@ -654,92 +643,163 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(jsonAggregateFunction: JsonAggregateFunction?, context: SqlContext) {
-        jsonAggregateFunction?.expression?.accept(this) { jsonAggregateFunction.expression = it as Expression? }
-        visitOrderByElements(jsonAggregateFunction?.expressionOrderByElements)
-        visitOrderByElements(jsonAggregateFunction?.orderByElements)
-        jsonAggregateFunction?.partitionExpressionList?.accept(this) {
-            if (it == null) {
-                jsonAggregateFunction.partitionExpressionList.expressions = null
-            } else {
-                jsonAggregateFunction.partitionExpressionList = it as ExpressionList?
-            }
-        }
-        jsonAggregateFunction?.filterExpression?.accept(this) {
+        jsonAggregateFunction ?: return
+        jsonAggregateFunction.expression?.accept(this) { jsonAggregateFunction.expression = it as Expression? }
+        visitOrderByElements(jsonAggregateFunction.expressionOrderByElements)
+        visitOrderByElements(jsonAggregateFunction.orderByElements)
+        visitExpressions(jsonAggregateFunction.partitionExpressionList)
+        jsonAggregateFunction.filterExpression?.accept(this) {
             jsonAggregateFunction.filterExpression = it as Expression?
         }
-        jsonAggregateFunction?.windowElement?.accept(this) {
+        jsonAggregateFunction.windowElement?.accept(this) {
             jsonAggregateFunction.windowElement = it as WindowElement?
         }
     }
 
     override fun visit(jsonFunction: JsonFunction?, context: SqlContext) {
-        val jsonFunctionExpressions = jsonFunction?.expressions ?: return
-        for (i in jsonFunctionExpressions.indices.reversed()) {
-            jsonFunctionExpressions[i].accept(this) {
-                if (it == null) {
-                    jsonFunctionExpressions.removeAt(i)
-                } else {
-                    jsonFunctionExpressions[i] = it as JsonFunctionExpression
-                }
-            }
-        }
-    }
-
-    override fun visit(jsonFunctionExpression: JsonFunctionExpression?, context: SqlContext) {
-        jsonFunctionExpression?.expression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                context.replace(JsonFunctionExpression(it as Expression))
-            }
-        }
+        visitList(jsonFunction?.expressions) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(connectByRootOperator: ConnectByRootOperator?, context: SqlContext) {
-        connectByRootOperator?.column?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                context.replace(ConnectByRootOperator(it as Column))
-            }
-        }
+        visitSingleExpression<Column?>(
+            context,
+            { connectByRootOperator?.column },
+            { context.replace(ConnectByRootOperator(it)) }
+        )
+    }
+
+    override fun visit(connectByPriorOperator: ConnectByPriorOperator?, context: SqlContext) {
+        visitSingleExpression<Column?>(
+            context,
+            { connectByPriorOperator?.column },
+            { context.replace(ConnectByRootOperator(it)) }
+        )
     }
 
     override fun visit(oracleNamedFunctionParameter: OracleNamedFunctionParameter?, context: SqlContext) {
-        oracleNamedFunctionParameter?.expression?.accept(this) {
-            context.replace(OracleNamedFunctionParameter(oracleNamedFunctionParameter.name, it as Expression?))
+        visitSingleExpression(context, { oracleNamedFunctionParameter?.expression }) {
+            context.replace(OracleNamedFunctionParameter(oracleNamedFunctionParameter?.name, it))
         }
     }
 
-    override fun visit(allColumns: AllColumns?, context: SqlContext) {}
-    override fun visit(allTableColumns: AllTableColumns?, context: SqlContext) {
-        allTableColumns?.table?.accept(this) {
+    override fun visit(allColumns: AllColumns?, context: SqlContext) {
+        visitExpressions<Column>(allColumns?.exceptColumns)
+        visitList(allColumns?.replaceExpressions) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(functionColumns: FunctionAllColumns?, context: SqlContext) {
+        functionColumns?.function?.accept(this) {
             if (it == null) {
                 context.replace(AllColumns())
             } else {
-                context.replace(AllTableColumns(it as Table))
+                functionColumns.function = it as Function
             }
         }
     }
 
-    override fun visit(selectExpressionItem: SelectExpressionItem?, context: SqlContext) {
-        selectExpressionItem?.expression?.accept(this) {
-            if (it == null) {
-                context.remove()
-            } else {
-                selectExpressionItem.expression = it as Expression
-            }
-        }
+    override fun visit(allTableColumns: AllTableColumns?, context: SqlContext) {
+        visit(allTableColumns as AllColumns, context)
+        // allTableColumns.table?.accept(this) {
+        //     if (it == null) {
+        //         val replacement = AllColumns(
+        //             allTableColumns.exceptColumns,
+        //             allTableColumns.replaceExpressions,
+        //             allTableColumns.exceptKeyword
+        //         )
+        //         context.replace(replacement)
+        //     } else {
+        //         allTableColumns.table = it as Table
+        //     }
+        // }
     }
 
-    override fun visit(allValue: AllValue?, context: SqlContext) {}
+    override fun visit(allValue: AllValue?, context: SqlContext) {
+
+    }
+
     override fun visit(isDistinctExpression: IsDistinctExpression?, context: SqlContext) {
-        visitBinaryExpression(isDistinctExpression, context)
+
     }
 
     override fun visit(geometryDistance: GeometryDistance?, context: SqlContext) {
-        visitBinaryExpression(geometryDistance, context)
+
     }
+
+    override fun visit(transcodingFunction: TranscodingFunction?, context: SqlContext) {
+        visitSingleExpression(
+            context,
+            { transcodingFunction?.expression },
+            { transcodingFunction?.expression = it }
+        )
+    }
+
+    override fun visit(trimFunction: TrimFunction?, context: SqlContext) {
+        trimFunction?.expression?.accept(this) { trimFunction.expression = it as Expression? }
+        trimFunction?.fromExpression?.accept(this) { trimFunction.fromExpression = it as Expression? }
+    }
+
+    override fun visit(rangeExpression: RangeExpression?, context: SqlContext) {
+        visitPairExpression(
+            context,
+            { rangeExpression?.startExpression },
+            { rangeExpression?.endExpression },
+            { rangeExpression?.startExpression = it },
+            { rangeExpression?.endExpression = it }
+        )
+    }
+
+    override fun visit(tsqlLeftJoin: TSQLLeftJoin?, context: SqlContext) {
+
+    }
+
+    override fun visit(tsqlRightJoin: TSQLRightJoin?, context: SqlContext) {
+
+    }
+
+    override fun visit(structType: StructType?, context: SqlContext) {
+        visitList(structType?.arguments) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(lambdaExpression: LambdaExpression?, context: SqlContext) {
+        lambdaExpression?.expression?.accept(this) { lambdaExpression.expression = it as Expression? }
+    }
+
+    override fun visit(highExpression: HighExpression?, context: SqlContext) {
+        visitSingleExpression(
+            context,
+            { highExpression?.expression },
+            { highExpression?.expression = it }
+        )
+    }
+
+    override fun visit(lowExpression: LowExpression?, context: SqlContext) {
+        visitSingleExpression(
+            context,
+            { lowExpression?.expression },
+            { lowExpression?.expression = it }
+        )
+    }
+
+    override fun visit(plus: Plus?, context: SqlContext) {
+        visitBinaryExpression(plus, context)
+    }
+
+    override fun visit(priorTo: PriorTo?, context: SqlContext) {
+        visitBinaryExpression(priorTo, context)
+    }
+
+    override fun visit(inverse: Inverse?, context: SqlContext) {
+        visitSingleExpression(context, { inverse?.expression }, { inverse?.expression = it })
+    }
+
+    override fun visit(cosineSimilarity: CosineSimilarity?, context: SqlContext) {
+
+    }
+
+    // -------------------------- expression visitor begin --------------------------
+
+
+    // -------------------------- statement visitor begin --------------------------
 
     override fun visit(analyze: Analyze?, context: SqlContext) {
         analyze?.table?.accept(this) {
@@ -751,117 +811,146 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         }
     }
 
-    override fun visit(savepointStatement: SavepointStatement?, context: SqlContext) {}
-    override fun visit(rollbackStatement: RollbackStatement?, context: SqlContext) {}
-    override fun visit(comment: Comment?, context: SqlContext) {
-        comment?.table?.accept(this) { comment.table = it as Table }
-        comment?.column?.accept(this) { comment.column = it as Column }
-        comment?.view?.accept(this) { comment.view = it as Table }
-        comment?.comment?.accept(this) { comment.comment = it as StringValue }
+    override fun visit(savepointStatement: SavepointStatement?, context: SqlContext) {
+
     }
 
-    override fun visit(commit: Commit?, context: SqlContext) {}
+    override fun visit(rollbackStatement: RollbackStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(comment: Comment?, context: SqlContext) {
+        // comment?.table?.accept(this) { comment.table = it as Table }
+        // comment?.column?.accept(this) { comment.column = it as Column }
+        // comment?.view?.accept(this) { comment.view = it as Table }
+        // comment?.comment?.accept(this) { comment.comment = it as StringValue }
+    }
+
+    override fun visit(commit: Commit?, context: SqlContext) {
+
+    }
+
     override fun visit(delete: Delete?, context: SqlContext) {
-        visitSelectBodies<WithItem>(delete?.withItemsList)
-        delete?.table?.accept(this) { delete.table = it as Table? }
-        visitFromItems<Table>(delete?.tables)
-        visitFromItems<Table>(delete?.usingList)
-        visitJoins(delete?.joins)
-        delete?.where?.accept(this) { delete.where = it as Expression? }
-        delete?.limit?.accept(this) { delete.limit = it as Limit? }
-        visitOrderByElements(delete?.orderByElements)
-        visitSelectItems(delete?.returningExpressionList)
-        delete?.outputClause?.accept(this) { delete.outputClause = it as OutputClause? }
+        delete ?: return
+        visitList(delete.withItemsList) { it, cxt -> it.accept(this, cxt) }
+        delete.table?.accept(this) { delete.table = it as Table? }
+        delete.oracleHint?.accept(this) { delete.oracleHint = it as OracleHint? }
+        visitList(delete.tables) { it, cxt -> it.accept(this, cxt) }
+        visitList(delete.usingList) { it, cxt -> it.accept(this, cxt) }
+        visitList(delete.joins) { it, cxt -> it.accept(this, cxt) }
+        delete.where?.accept(this) { delete.where = it as Expression? }
+        delete.preferringClause?.accept(this) { delete.preferringClause = it as PreferringClause? }
+        delete.limit?.accept(this) { delete.limit = it as Limit? }
+        visitOrderByElements(delete.orderByElements)
+        delete.returningClause?.accept(this) { delete.returningClause = it as ReturningClause? }
+        delete.outputClause?.accept(this) { delete.outputClause = it as OutputClause? }
     }
 
     override fun visit(update: Update?, context: SqlContext) {
-        visitSelectBodies<WithItem>(update?.withItemsList)
-        update?.table?.accept(this) { update.table = it as Table? }
-        update?.where?.accept(this) { update.where = it as Expression? }
-        visitUpdateSets(update?.updateSets)
-        update?.fromItem?.accept(this) { update.fromItem = it as FromItem? }
-        visitJoins(update?.joins)
-        visitJoins(update?.startJoins)
-        visitOrderByElements(update?.orderByElements)
-        update?.limit?.accept(this) { update.limit = it as Limit? }
-        visitSelectItems(update?.returningExpressionList)
-        update?.outputClause?.accept(this) { update.outputClause = it as OutputClause? }
-    }
-
-    override fun visit(updateSet: UpdateSet?, context: SqlContext) {
-        visitExpressions<Column>(updateSet?.columns)
-        visitExpressions(updateSet?.expressions)
+        update ?: return
+        if (visitSingleFromItem(context, { update.table }, { update.table = it })) {
+            return
+        }
+        visitList(update.withItemsList) { it, cxt -> it.accept(this, cxt) }
+        update.where?.accept(this) { update.where = it as Expression? }
+        update.preferringClause?.accept(this) { update.preferringClause = it as PreferringClause? }
+        visitList(update.updateSets) { it, cxt -> it.accept(this, cxt) }
+        update.fromItem?.accept(this) { update.fromItem = it as FromItem? }
+        visitList(update.joins) { it, cxt -> it.accept(this, cxt) }
+        visitList(update.startJoins) { it, cxt -> it.accept(this, cxt) }
+        visitOrderByElements(update.orderByElements)
+        update.limit?.accept(this) { update.limit = it as Limit? }
+        update.returningClause?.accept(this) { update.returningClause = it as ReturningClause? }
+        update.outputClause?.accept(this) { update.outputClause = it as OutputClause? }
     }
 
     override fun visit(insert: Insert?, context: SqlContext) {
-        insert?.table?.accept(this) { insert.table = it as Table? }
-        insert?.oracleHint?.accept(this) { insert.oracleHint = it as OracleHint? }
-        visitExpressions<Column>(insert?.columns)
-        insert?.select?.accept(this) { insert.select = it as Select? }
-        visitExpressions<Column>(insert?.duplicateUpdateColumns)
-        visitExpressions(insert?.duplicateUpdateExpressionList)
-        visitSelectItems(insert?.returningExpressionList)
-        visitExpressions<Column>(insert?.setColumns)
-        visitExpressions(insert?.setExpressionList)
-        visitSelectBodies<WithItem>(insert?.withItemsList)
-        insert?.outputClause?.accept(this) { insert.outputClause = it as OutputClause? }
-        insert?.conflictTarget?.accept(this) { insert.conflictTarget = it as InsertConflictTarget? }
-        insert?.conflictAction?.accept(this) { insert.conflictAction = it as InsertConflictAction? }
-    }
-
-    override fun visit(insertConflictAction: InsertConflictAction?, context: SqlContext) {
-        visitUpdateSets(insertConflictAction?.updateSets)
-        insertConflictAction?.whereExpression?.accept(this) { insertConflictAction.whereExpression = it as Expression? }
-    }
-
-    override fun visit(insertConflictTarget: InsertConflictTarget?, context: SqlContext) {
-        insertConflictTarget?.indexExpression?.accept(this) { insertConflictTarget.indexExpression = it as Expression? }
-        insertConflictTarget?.whereExpression?.accept(this) { insertConflictTarget.whereExpression = it as Expression? }
+        insert ?: return
+        if (visitSingleFromItem(context, { insert.table }, { insert.table = it })) {
+            return
+        }
+        insert.oracleHint?.accept(this) { insert.oracleHint = it as OracleHint? }
+        visitExpressions<Column>(insert.columns)
+        visitList(insert.partitions) { it, cxt -> it.accept(this, cxt) }
+        insert.select?.accept(this) { insert.select = it as Select? }
+        visitList(insert.duplicateUpdateSets) { it, cxt -> it.accept(this, cxt) }
+        insert.returningClause?.accept(this) { insert.returningClause = it as ReturningClause? }
+        visitList(insert.setUpdateSets) { it, cxt -> it.accept(this, cxt) }
+        visitList(insert.withItemsList) { it, cxt -> it.accept(this, cxt) }
+        insert.outputClause?.accept(this) { insert.outputClause = it as OutputClause? }
+        insert.conflictTarget?.accept(this) { insert.conflictTarget = it as InsertConflictTarget? }
+        insert.conflictAction?.accept(this) { insert.conflictAction = it as InsertConflictAction? }
     }
 
     override fun visit(drop: Drop?, context: SqlContext) {
-        drop?.name?.accept(this) { drop.name = it as Table? }
+        visitSingleFromItem(context, { drop?.name }, { drop?.name = it })
     }
 
     override fun visit(truncate: Truncate?, context: SqlContext) {
         truncate?.table?.accept(this) { truncate.table = it as Table? }
+        visitList(truncate?.tables) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(createIndex: CreateIndex?, context: SqlContext) {
-        createIndex?.table?.accept(this) { createIndex.table = it as Table? }
+        visitSingleFromItem(context, { createIndex?.table }, { createIndex?.table = it })
     }
 
     override fun visit(createSchema: CreateSchema?, context: SqlContext) {
-        visitStatements(createSchema?.statements)
+        // visitList(createSchema?.statements) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(createTable: CreateTable?, context: SqlContext) {
-        createTable?.table?.accept(this) { createTable.table = it as Table? }
-        createTable?.select?.accept(this) { createTable.setSelect(it as Select?, createTable.isSelectParenthesis) }
-        createTable?.likeTable?.accept(this) { createTable.setLikeTable(it as Table?, createTable.isSelectParenthesis) }
-        createTable?.spannerInterleaveIn?.accept(this) { createTable.spannerInterleaveIn = it as SpannerInterleaveIn? }
+        createTable ?: return
+        if (visitSingleFromItem(context, { createTable.table }, { createTable.table = it })) {
+            return
+        }
+        visitList(createTable.columnDefinitions) { it, cxt -> it.accept(this, cxt) }
+        visitList(createTable.indexes) { it, cxt -> it.accept(this, cxt) }
+        createTable.select?.accept(this) {
+            createTable.setSelect(it as Select?, createTable.isSelectParenthesis)
+        }
+        createTable.likeTable?.accept(this) {
+            createTable.setLikeTable(it as Table?, createTable.isSelectParenthesis)
+        }
+        createTable.spannerInterleaveIn?.accept(this) {
+            createTable.spannerInterleaveIn = it as SpannerInterleaveIn?
+        }
     }
 
     override fun visit(createView: CreateView?, context: SqlContext) {
-        createView?.view?.accept(this) { createView.view = it as Table? }
-        createView?.select?.accept(this) { createView.select = it as Select? }
+        createView ?: return
+        if (visitSingleFromItem(context, { createView.view }, { createView.view = it })) {
+            return
+        }
+        createView.select?.accept(this) { createView.select = it as Select? }
+        visitExpressions<Column>(createView.columnNames)
     }
 
     override fun visit(alterView: AlterView?, context: SqlContext) {
-        alterView?.view?.accept(this) { alterView.view = it as Table? }
-        alterView?.selectBody?.accept(this) { alterView.selectBody = it as SelectBody? }
+        alterView ?: return
+        if (visitSingleFromItem(context, { alterView.view }, { alterView.view = it })) {
+            return
+        }
+        alterView.select?.accept(this) { alterView.select = it as Select? }
+    }
+
+    override fun visit(materializedView: RefreshMaterializedViewStatement?, context: SqlContext) {
+        visitSingleFromItem(context, { materializedView?.view }, { materializedView?.view = it })
     }
 
     override fun visit(alter: Alter?, context: SqlContext) {
-        alter?.table?.accept(this) { alter.table = it as Table? }
+        visitSingleFromItem(context, { alter?.table }, { alter?.table = it })
     }
 
     override fun visit(statements: Statements?, context: SqlContext) {
-        visitStatements(statements?.statements)
+        visitList(statements) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(execute: Execute?, context: SqlContext) {
-        execute?.exprList?.accept(this) { execute.exprList = it as ExpressionList? }
+        visitExpressions(execute?.exprList)
+        if (execute?.exprList.isNullOrEmpty()) {
+            execute?.exprList = null
+        }
     }
 
     override fun visit(setStatement: SetStatement?, context: SqlContext) {
@@ -871,223 +960,618 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         }
     }
 
-    override fun visit(resetStatement: ResetStatement?, context: SqlContext) {}
-    override fun visit(showColumnsStatement: ShowColumnsStatement?, context: SqlContext) {}
-    override fun visit(showIndexStatement: ShowIndexStatement?, context: SqlContext) {}
+    override fun visit(resetStatement: ResetStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(showColumnsStatement: ShowColumnsStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(showIndexStatement: ShowIndexStatement?, context: SqlContext) {
+
+    }
+
     override fun visit(showTablesStatement: ShowTablesStatement?, context: SqlContext) {
         showTablesStatement?.likeExpression?.accept(this) { showTablesStatement.likeExpression = it as Expression? }
         showTablesStatement?.whereCondition?.accept(this) { showTablesStatement.whereCondition = it as Expression? }
     }
 
     override fun visit(merge: Merge?, context: SqlContext) {
-        visitSelectBodies<WithItem>(merge?.withItemsList)
-        merge?.table?.accept(this) { merge.table = it as Table? }
-        merge?.oracleHint?.accept(this) { merge.oracleHint = it as OracleHint? }
-        merge?.usingTable?.accept(this) { merge.usingTable = it as Table? }
-        merge?.usingSelect?.accept(this) { merge.usingSelect = it as SubSelect? }
-        merge?.onCondition?.accept(this) { merge.onCondition = it as Expression? }
-        merge?.mergeInsert?.accept(this) { merge.mergeInsert = it as MergeInsert? }
-        merge?.mergeUpdate?.accept(this) { merge.mergeUpdate = it as MergeUpdate? }
-    }
-
-    override fun visit(mergeInsert: MergeInsert?, context: SqlContext) {
-        visitExpressions<Column>(mergeInsert?.columns)
-        visitExpressions(mergeInsert?.values)
-        mergeInsert?.whereCondition?.accept(this) { mergeInsert.whereCondition = it as Expression? }
-    }
-
-    override fun visit(mergeUpdate: MergeUpdate?, context: SqlContext) {
-        visitExpressions<Column>(mergeUpdate?.columns)
-        visitExpressions(mergeUpdate?.values)
-        mergeUpdate?.whereCondition?.accept(this) { mergeUpdate.whereCondition = it as Expression? }
-        mergeUpdate?.deleteWhereCondition?.accept(this) { mergeUpdate.deleteWhereCondition = it as Expression? }
+        merge ?: return
+        visitList(merge.withItemsList) { it, cxt -> it.accept(this, cxt) }
+        merge.table?.accept(this) { merge.table = it as Table? }
+        merge.oracleHint?.accept(this) { merge.oracleHint = it as OracleHint? }
+        merge.fromItem?.accept(this) { merge.fromItem = it as FromItem? }
+        merge.onCondition?.accept(this) { merge.onCondition = it as Expression? }
+        merge.mergeInsert?.accept(this) { merge.mergeInsert = it as MergeInsert? }
+        merge.mergeUpdate?.accept(this) { merge.mergeUpdate = it as MergeUpdate? }
+        merge.outputClause?.accept(this) { merge.outputClause = it as OutputClause? }
     }
 
     override fun visit(select: Select?, context: SqlContext) {
-        select?.selectBody?.accept(this) { select.selectBody = it as SelectBody? }
-        visitSelectBodies<WithItem>(select?.withItemsList)
+        select ?: return
+        select.forUpdateTable?.accept(this) { select.forUpdateTable = it as Table? }
+        visitList(select.withItemsList) { it, cxt -> it.accept(this, cxt) }
+        select.limitBy?.accept(this) { select.limitBy = it as Limit? }
+        select.limit?.accept(this) { select.limit = it as Limit? }
+        select.offset?.accept(this) { select.offset = it as Offset? }
+        select.fetch?.accept(this) { select.fetch = it as Fetch? }
+        visitOrderByElements(select.orderByElements)
+        select.pivot?.accept(this) { select.pivot = it as Pivot? }
+        select.unPivot?.accept(this) { select.unPivot = it as UnPivot? }
     }
 
     override fun visit(upsert: Upsert?, context: SqlContext) {
-        upsert?.table?.accept(this) { upsert.table = it as Table? }
-        visitExpressions<Column>(upsert?.columns)
-        upsert?.itemsList?.accept(this) { upsert.itemsList = it as ItemsList? }
-        upsert?.select?.accept(this) { upsert.select = it as Select? }
-        visitExpressions<Column>(upsert?.duplicateUpdateColumns)
-        visitExpressions(upsert?.duplicateUpdateExpressionList)
+        upsert ?: return
+        if (visitSingleFromItem(context, { upsert.table }, { upsert.table = it })) {
+            return
+        }
+        visitExpressions<Column>(upsert.columns)
+        visitExpressions(upsert.expressions)
+        upsert.select?.accept(this) { upsert.select = it as Select? }
+        visitList(upsert.updateSets) { it, cxt -> it.accept(this, cxt) }
+        visitList(upsert.duplicateUpdateSets) { it, cxt -> it.accept(this, cxt) }
     }
 
-    override fun visit(useStatement: UseStatement?, context: SqlContext) {}
+    override fun visit(useStatement: UseStatement?, context: SqlContext) {
+
+    }
+
     override fun visit(block: Block?, context: SqlContext) {
-        block?.statements?.accept(this) { block.statements = it as Statements? }
-    }
-
-    override fun visit(distinct: Distinct?, context: SqlContext) {
-        visitSelectItems(distinct?.onSelectItems)
-    }
-
-    override fun visit(plainSelect: PlainSelect?, context: SqlContext) {
-        plainSelect?.distinct?.accept(this) { plainSelect.distinct = it as Distinct? }
-        visitSelectItems(plainSelect?.selectItems)
-        visitFromItems<Table>(plainSelect?.intoTables)
-        plainSelect?.fromItem?.accept(this) { plainSelect.fromItem = it as FromItem? }
-        visitJoins(plainSelect?.joins)
-        plainSelect?.where?.accept(this) { plainSelect.where = it as Expression? }
-        plainSelect?.groupBy?.accept(this) { plainSelect.setGroupByElement(it as GroupByElement?) }
-        visitOrderByElements(plainSelect?.orderByElements)
-        plainSelect?.having?.accept(this) { plainSelect.having = it as Expression? }
-        plainSelect?.limit?.accept(this) { plainSelect.limit = it as Limit? }
-        plainSelect?.offset?.accept(this) { plainSelect.offset = it as Offset? }
-        plainSelect?.oracleHierarchical?.accept(this) {
-            plainSelect.oracleHierarchical = it as OracleHierarchicalExpression?
-        }
-        plainSelect?.oracleHint?.accept(this) { plainSelect.oracleHint = it as OracleHint? }
-        plainSelect?.forUpdateTable?.accept(this) { plainSelect.forUpdateTable = it as Table? }
-        val windowDefinitions = plainSelect?.windowDefinitions ?: return
-        for (i in windowDefinitions.indices.reversed()) {
-            windowDefinitions[i].accept(this) {
-                if (it == null) {
-                    windowDefinitions.removeAt(i)
-                } else {
-                    windowDefinitions[i] = it as WindowDefinition
-                }
-            }
-        }
-    }
-
-    override fun visit(setOperationList: SetOperationList?, context: SqlContext) {
-        visitSelectBodies(setOperationList?.selects)
-        visitOrderByElements(setOperationList?.orderByElements)
-        setOperationList?.limit?.accept(this) { setOperationList.limit = it as Limit? }
-        setOperationList?.offset?.accept(this) { setOperationList.offset = it as Offset? }
-    }
-
-    override fun visit(withItem: WithItem?, context: SqlContext) {
-        visitSelectItems(withItem?.withItemList)
-        withItem?.itemsList?.accept(this) { withItem.itemsList = it as ItemsList? }
-        withItem?.subSelect?.accept(this) { withItem.subSelect = it as SubSelect? }
-    }
-
-    override fun visit(valuesStatement: ValuesStatement?, context: SqlContext) {
-        valuesStatement?.expressions?.accept(this) { valuesStatement.expressions = it as ItemsList? }
+        visitList(block?.statements) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(describeStatement: DescribeStatement?, context: SqlContext) {
-        describeStatement?.table?.accept(this) { describeStatement.table = it as Table? }
+        visitSingleFromItem(context, { describeStatement?.table }, { describeStatement?.table = it })
     }
 
     override fun visit(explainStatement: ExplainStatement?, context: SqlContext) {
         explainStatement?.statement?.accept(this) { explainStatement.statement = it as Select? }
+        explainStatement?.table?.accept(this) { explainStatement.table = it as Table? }
     }
 
-    override fun visit(showStatement: ShowStatement?, context: SqlContext) {}
+    override fun visit(showStatement: ShowStatement?, context: SqlContext) {
+
+    }
+
     override fun visit(declareStatement: DeclareStatement?, context: SqlContext) {
         declareStatement?.userVariable?.accept(this) { declareStatement.userVariable = it as UserVariable? }
+        visitList(declareStatement?.typeDefExprList) { it, cxt -> it.accept(this, cxt) }
+        visitList(declareStatement?.columnDefinitions) { it, cxt -> it.accept(this, cxt) }
     }
 
-    override fun visit(grant: Grant?, context: SqlContext) {}
-    override fun visit(createSequence: CreateSequence?, context: SqlContext) {}
-    override fun visit(alterSequence: AlterSequence?, context: SqlContext) {}
-    override fun visit(createFunctionalStatement: CreateFunctionalStatement?, context: SqlContext) {}
-    override fun visit(createSynonym: CreateSynonym?, context: SqlContext) {}
-    override fun visit(alterSession: AlterSession?, context: SqlContext) {}
+    override fun visit(grant: Grant?, context: SqlContext) {
+
+    }
+
+    override fun visit(createSequence: CreateSequence?, context: SqlContext) {
+
+    }
+
+    override fun visit(alterSequence: AlterSequence?, context: SqlContext) {
+
+    }
+
+    override fun visit(createFunctionalStatement: CreateFunctionalStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(createSynonym: CreateSynonym?, context: SqlContext) {
+
+    }
+
+    override fun visit(alterSession: AlterSession?, context: SqlContext) {
+
+    }
+
     override fun visit(ifElseStatement: IfElseStatement?, context: SqlContext) {
-        ifElseStatement?.elseStatement?.accept(this) { ifElseStatement.elseStatement = it as Statement? }
+        ifElseStatement ?: return
+        val ref = AtomicReference(ifElseStatement)
+        ifElseStatement.condition.accept(this) {
+            if (it == null) {
+                ref.set(null)
+                context.remove()
+            } else {
+                val newValue = IfElseStatement(it as Expression, ifElseStatement.ifStatement)
+                newValue.elseStatement = ifElseStatement.elseStatement
+                newValue.isUsingSemicolonForIfStatement = ifElseStatement.isUsingSemicolonForIfStatement
+                newValue.isUsingSemicolonForElseStatement = ifElseStatement.isUsingSemicolonForElseStatement
+                ref.set(newValue)
+                context.replace(newValue)
+            }
+        }
+        if (ref.get() == null) return
+        ref.get().ifStatement?.accept(this) {
+            val newValue = IfElseStatement(ref.get().condition, it as Statement?)
+            newValue.elseStatement = ref.get().elseStatement
+            newValue.isUsingSemicolonForIfStatement = ref.get().isUsingSemicolonForIfStatement
+            newValue.isUsingSemicolonForElseStatement = ref.get().isUsingSemicolonForElseStatement
+            ref.set(newValue)
+            context.replace(newValue)
+        }
+        ref.get().elseStatement?.accept(this) { ref.get().elseStatement = it as Statement? }
     }
 
-    override fun visit(renameTableStatement: RenameTableStatement?, context: SqlContext) {}
-    override fun visit(purgeStatement: PurgeStatement?, context: SqlContext) {}
-    override fun visit(alterSystemStatement: AlterSystemStatement?, context: SqlContext) {}
-    override fun visit(unsupportedStatement: UnsupportedStatement?, context: SqlContext) {}
-    override fun visit(groupByElement: GroupByElement?, context: SqlContext) {
-        groupByElement?.groupByExpressionList?.accept(this) {
-            groupByElement.groupByExpressionList = it as ExpressionList?
+    override fun visit(renameTableStatement: RenameTableStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(purgeStatement: PurgeStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(alterSystemStatement: AlterSystemStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(unsupportedStatement: UnsupportedStatement?, context: SqlContext) {
+
+    }
+
+    override fun visit(parenthesedInsert: ParenthesedInsert?, context: SqlContext) {
+        visitSingleStatement(context, { parenthesedInsert?.insert }, { parenthesedInsert?.insert = it })
+    }
+
+    override fun visit(parenthesedUpdate: ParenthesedUpdate?, context: SqlContext) {
+        visitSingleStatement(context, { parenthesedUpdate?.update }, { parenthesedUpdate?.update = it })
+    }
+
+    override fun visit(parenthesedDelete: ParenthesedDelete?, context: SqlContext) {
+        visitSingleStatement(context, { parenthesedDelete?.delete }, { parenthesedDelete?.delete = it })
+    }
+
+    // -------------------------- statement visitor end --------------------------
+
+
+    // -------------------------- select visitor begin --------------------------
+
+    override fun visit(parenthesedSelect: ParenthesedSelect?, context: SqlContext) {
+        parenthesedSelect ?: return
+        if (visitSingleStatement(context, { parenthesedSelect.select }, { parenthesedSelect.select = it })) {
+            return
+        }
+        parenthesedSelect.pivot?.accept(this) { parenthesedSelect.pivot = it as Pivot? }
+        parenthesedSelect.unPivot?.accept(this) { parenthesedSelect.unPivot = it as UnPivot? }
+        visit(parenthesedSelect as Select, context)
+    }
+
+    override fun visit(plainSelect: PlainSelect?, context: SqlContext) {
+        plainSelect ?: return
+
+        // extends Select
+        visit(plainSelect as Select, context)
+
+        // PlainSelect self
+        plainSelect.distinct?.accept(this) { plainSelect.distinct = it as Distinct? }
+        visitList(plainSelect.selectItems) { it, cxt -> it.accept(this, cxt) }
+        visitList(plainSelect.intoTables) { it, cxt -> it.accept(this, cxt) }
+        plainSelect.fromItem?.accept(this) { plainSelect.fromItem = it as FromItem? }
+        visitList(plainSelect.lateralViews) { it, cxt -> it.accept(this, cxt) }
+        visitList(plainSelect.joins) { it, cxt -> it.accept(this, cxt) }
+        plainSelect.where?.accept(this) { plainSelect.where = it as Expression? }
+        plainSelect.groupBy?.accept(this) { plainSelect.setGroupByElement(it as GroupByElement?) }
+        plainSelect.having?.accept(this) { plainSelect.having = it as Expression? }
+        plainSelect.qualify?.accept(this) { plainSelect.qualify = it as Expression? }
+        plainSelect.skip?.accept(this) { plainSelect.skip = it as Skip? }
+        plainSelect.first?.accept(this) { plainSelect.first = it as First? }
+        plainSelect.top?.accept(this) { plainSelect.top = it as Top? }
+        plainSelect.oracleHierarchical?.accept(this) {
+            plainSelect.oracleHierarchical = it as OracleHierarchicalExpression?
+        }
+        plainSelect.preferringClause?.accept(this) { plainSelect.preferringClause = it as PreferringClause? }
+        plainSelect.oracleHint?.accept(this) { plainSelect.oracleHint = it as OracleHint? }
+        visitList(plainSelect.windowDefinitions) { it, cxt -> it.accept(this, cxt) }
+        plainSelect.intoTempTable?.accept(this) { plainSelect.intoTempTable = it as Table? }
+    }
+
+    override fun visit(fromQuery: FromQuery?, context: SqlContext) {
+        fromQuery ?: return
+        visit(fromQuery as Select, context)
+        fromQuery.fromItem?.accept(this) { fromQuery.fromItem = it as FromItem? }
+        visitList(fromQuery.lateralViews) { it, cxt -> it.accept(this, cxt) }
+        visitList(fromQuery.joins) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(setOpList: SetOperationList?, context: SqlContext) {
+        visit(setOpList as Select?, context)
+        visitList(setOpList?.selects) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(withItem: WithItem<out ParenthesedStatement?>?, context: SqlContext) {
+        withItem ?: return
+        (withItem as WithItem<ParenthesedStatement?>).parenthesedStatement?.accept(this) {
+            withItem.parenthesedStatement = it as ParenthesedStatement?
+        }
+        visitList(withItem.withItemList) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(values: Values?, context: SqlContext) {
+        visitExpressions(values?.expressions)
+        if (values?.expressions.isNullOrEmpty()) {
+            context.remove()
         }
     }
+
+    override fun visit(lateralSubSelect: LateralSubSelect?, context: SqlContext) {
+        visit(lateralSubSelect as ParenthesedSelect, context)
+    }
+
+    override fun visit(tableStatement: TableStatement?, context: SqlContext) {
+        tableStatement ?: return
+        if (visitSingleFromItem(context, { tableStatement.table }, { tableStatement.table = it })) {
+            return
+        }
+        visitOrderByElements(tableStatement.orderByElements)
+        tableStatement.limit?.accept(this) { tableStatement.limit = it as Limit? }
+        tableStatement.offset?.accept(this) { tableStatement.offset = it as Offset? }
+    }
+
+    // -------------------------- select visitor end --------------------------
+
+
+    // -------------------------- selectItem visitor begin --------------------------
+
+    override fun visit(selectItem: SelectItem<out Expression?>?, context: SqlContext) {
+        val item = selectItem as SelectItem<Expression?>?
+        visitSingleExpression(context, { item?.expression }, { item?.expression = it })
+    }
+
+    // -------------------------- selectItem visitor end --------------------------
+
+
+    // -------------------------- fromItem visitor begin --------------------------
+
+    override fun visit(table: Table?, context: SqlContext) {
+        table?.pivot?.accept(this) { table.pivot = it as Pivot? }
+        table?.unPivot?.accept(this) { table.unPivot = it as UnPivot? }
+    }
+
+    override fun visit(tableFunction: TableFunction?, context: SqlContext) {
+        tableFunction ?: return
+        if (visitSingleExpression(context, { tableFunction.function }, { tableFunction.function = it })) {
+            return
+        }
+        tableFunction.pivot?.accept(this) { tableFunction.pivot = it as Pivot? }
+        tableFunction.unPivot?.accept(this) { tableFunction.unPivot = it as UnPivot? }
+    }
+
+    override fun visit(parenthesedFromItem: ParenthesedFromItem?, context: SqlContext) {
+        parenthesedFromItem ?: return
+        if (visitSingleFromItem(context, { parenthesedFromItem.fromItem }, { parenthesedFromItem.fromItem = it })) {
+            return
+        }
+        visitList(parenthesedFromItem.joins) { it, cxt -> it.accept(this, cxt) }
+        parenthesedFromItem.pivot?.accept(this) { parenthesedFromItem.pivot = it as Pivot? }
+        parenthesedFromItem.unPivot?.accept(this) { parenthesedFromItem.unPivot = it as UnPivot? }
+    }
+
+    // -------------------------- fromItem visitor end --------------------------
+
+
+    // -------------------------- groupBy visitor begin --------------------------
+
+    override fun visit(groupByElement: GroupByElement?, context: SqlContext) {
+        visitExpressions(groupByElement?.groupByExpressionList)
+        visitList(groupByElement?.groupingSets) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    // -------------------------- groupBy visitor end --------------------------
+
+
+    // -------------------------- orderBy visitor begin --------------------------
 
     override fun visit(orderByElement: OrderByElement?, context: SqlContext) {
-        orderByElement?.expression?.accept(this) { orderByElement.expression = it as Expression? }
+        visitSingleExpression(context, { orderByElement?.expression }, { orderByElement?.expression = it })
     }
 
+    // -------------------------- orderBy visitor end --------------------------
+
+
+    // -------------------------- pivot visitor begin --------------------------
+
     override fun visit(pivot: Pivot?, context: SqlContext) {
-        if (pivot?.functionItems != null) {
-            for (i in pivot.functionItems.indices.reversed()) {
-                pivot.functionItems[i].accept(this) {
-                    if (it == null) {
-                        pivot.functionItems.removeAt(i)
-                    } else {
-                        pivot.functionItems[i] = it as FunctionItem
-                    }
-                }
-            }
-        }
-        visitExpressions<Column>(pivot?.forColumns)
-        visitSelectItems<SelectExpressionItem>(pivot?.singleInItems)
-        if (pivot?.multiInItems != null) {
-            for (i in pivot.multiInItems.indices.reversed()) {
-                pivot.multiInItems[i].accept(this) {
-                    if (it == null) {
-                        pivot.multiInItems.removeAt(i)
-                    } else {
-                        pivot.multiInItems[i] = it as ExpressionListItem
-                    }
-                }
-            }
-        }
+        pivot ?: return
+        visitList(pivot.functionItems) { it, cxt -> it.accept(this, cxt) }
+        visitExpressions<Column>(pivot.forColumns)
+        visitList(pivot.singleInItems) { it, cxt -> it.accept(this, cxt) }
+        visitList(pivot.multiInItems) { it, cxt -> it.accept(this, cxt) }
     }
 
     override fun visit(pivotXml: PivotXml?, context: SqlContext) {
         visit(pivotXml as Pivot?, context)
-        pivotXml?.inSelect?.accept(this) { pivotXml.inSelect = it as SelectBody? }
+        pivotXml?.inSelect?.accept(this) { pivotXml.inSelect = it as Select? }
     }
 
     override fun visit(unPivot: UnPivot?, context: SqlContext) {
         visitExpressions<Column>(unPivot?.unPivotClause)
         visitExpressions<Column>(unPivot?.unPivotForClause)
-        visitSelectItems<SelectExpressionItem>(unPivot?.unPivotInClause)
+        visitList(unPivot?.unPivotInClause) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    // -------------------------- pivot visitor end --------------------------
+
+
+    // -------------------------- mergeOperation visitor begin --------------------------
+
+    override fun visit(mergeDelete: MergeDelete?, context: SqlContext) {
+        visitSingleExpression(context, { mergeDelete?.andPredicate }, { mergeDelete?.andPredicate = it })
+    }
+
+    override fun visit(mergeUpdate: MergeUpdate?, context: SqlContext) {
+        mergeUpdate ?: return
+        visitList(mergeUpdate.updateSets) { it, cxt -> it.accept(this, cxt) }
+        mergeUpdate.andPredicate?.accept(this) { mergeUpdate.andPredicate = it as Expression? }
+        mergeUpdate.whereCondition?.accept(this) { mergeUpdate.whereCondition = it as Expression? }
+        mergeUpdate.deleteWhereCondition?.accept(this) { mergeUpdate.deleteWhereCondition = it as Expression? }
+    }
+
+    override fun visit(mergeInsert: MergeInsert?, context: SqlContext) {
+        mergeInsert ?: return
+        mergeInsert.andPredicate?.accept(this) { mergeInsert.andPredicate = it as Expression? }
+        visitExpressions<Column>(mergeInsert.columns)
+        visitExpressions(mergeInsert.values)
+        mergeInsert.whereCondition?.accept(this) { mergeInsert.whereCondition = it as Expression? }
+    }
+
+    // -------------------------- mergeOperation visitor end --------------------------
+
+
+    // -------------------------- pipeOperator visitor begin --------------------------
+
+    override fun visit(aggregate: AggregatePipeOperator?, context: SqlContext) {
+        visitList(aggregate?.selectItems) { it, cxt -> it.accept(this, cxt) }
+        visitList(aggregate?.groupItems) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(`as`: AsPipeOperator?, context: SqlContext) {
+
+    }
+
+    override fun visit(call: CallPipeOperator?, context: SqlContext) {
+        visitSingleExpression(context, { call?.tableFunction }, { call?.tableFunction = it })
+    }
+
+    override fun visit(drop: DropPipeOperator?, context: SqlContext) {
+        visitExpressions<Column>(drop?.columns)
+    }
+
+    override fun visit(extend: ExtendPipeOperator?, context: SqlContext) {
+        visit(extend as SelectPipeOperator, context)
+    }
+
+    override fun visit(join: JoinPipeOperator?, context: SqlContext) {
+        visitSingle(context, { join?.join }, { join?.join = it }) { it, cxt ->
+            it?.accept(this, cxt)
+        }
+    }
+
+    override fun visit(limit: LimitPipeOperator?, context: SqlContext) {
+        limit ?: return
+        if (visitSingleExpression(context, { limit.limitExpression }, { limit.limitExpression = it })) {
+            return
+        }
+        limit.offsetExpression?.accept(this) { limit.offsetExpression = it as Expression? }
+    }
+
+    override fun visit(orderBy: OrderByPipeOperator?, context: SqlContext) {
+        orderBy ?: return
+        visitOrderByElements(orderBy.orderByElements)
+        if (orderBy.orderByElements.isNullOrEmpty()) {
+            context.remove()
+        }
+    }
+
+    override fun visit(pivot: PivotPipeOperator?, context: SqlContext) {
+        pivot ?: return
+        pivot.aggregateExpression?.accept(this) { pivot.aggregateExpression = it as Function? }
+        pivot.inputColumn?.accept(this) { pivot.inputColumn = it as Column? }
+        visitList(pivot.pivotColumns) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(rename: RenamePipeOperator?, context: SqlContext) {
+        visit(rename as SelectPipeOperator, context)
+    }
+
+    override fun visit(select: SelectPipeOperator?, context: SqlContext) {
+        visitList(select?.selectItems) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(set: SetPipeOperator?, context: SqlContext) {
+        visitList(set?.updateSets) { it, cxt -> it.accept(this, cxt) }
+        if (set?.updateSets.isNullOrEmpty()) {
+            context.remove()
+        }
+    }
+
+    override fun visit(tableSample: TableSamplePipeOperator?, context: SqlContext) {
+
+    }
+
+    override fun visit(union: SetOperationPipeOperator?, context: SqlContext) {
+        visitList(union?.selects) { it, cxt -> this.visit(it, cxt) }
+    }
+
+    override fun visit(unPivot: UnPivotPipeOperator?, context: SqlContext) {
+        unPivot ?: return
+        unPivot.valuesColumn?.accept(this) { unPivot.valuesColumn = it as Column? }
+        unPivot.nameColumn?.accept(this) { unPivot.nameColumn = it as Column? }
+        visitList(unPivot.pivotColumns) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(where: WherePipeOperator?, context: SqlContext) {
+        visitSingleExpression(context, { where?.expression }, { where?.expression = it })
+    }
+
+    override fun visit(window: WindowPipeOperator?, context: SqlContext) {
+        visit(window as SelectPipeOperator, context)
+    }
+
+    // -------------------------- pipeOperator visitor end --------------------------
+
+
+    // -------------------------- other visitor begin --------------------------
+
+    override fun visit(havingClause: Function.HavingClause?, context: SqlContext) {
+        visitSingleExpression(context, { havingClause?.expression }, { havingClause?.expression = it })
+    }
+
+    override fun visit(typeDefExpr: DeclareStatement.TypeDefExpr?, context: SqlContext) {
+        val ref = AtomicReference(typeDefExpr)
+        typeDefExpr?.userVariable?.accept(this) {
+            val newValue = DeclareStatement.TypeDefExpr(
+                it as UserVariable?,
+                typeDefExpr.colDataType,
+                typeDefExpr.defaultExpr
+            )
+            context.replace(newValue)
+            ref.set(newValue)
+        }
+        ref.get()?.defaultExpr?.accept(this) {
+            val newValue = DeclareStatement.TypeDefExpr(
+                ref.get()?.userVariable,
+                ref.get()?.colDataType,
+                it as Expression?
+            )
+            context.replace(newValue)
+        }
+    }
+
+    override fun visit(updateSet: UpdateSet?, context: SqlContext) {
+        visitExpressions<Column>(updateSet?.columns)
+        visitExpressions(updateSet?.values)
+    }
+
+    override fun visit(insertConflictAction: InsertConflictAction?, context: SqlContext) {
+        insertConflictAction?.whereExpression?.accept(this) {
+            insertConflictAction.whereExpression = it as Expression?
+        }
+        visitList(insertConflictAction?.updateSets) { it, cxt -> it.accept(this, cxt) }
+    }
+
+    override fun visit(insertConflictTarget: InsertConflictTarget?, context: SqlContext) {
+        insertConflictTarget?.indexExpression?.accept(this) {
+            insertConflictTarget.indexExpression = it as Expression?
+        }
+        insertConflictTarget?.whereExpression?.accept(this) {
+            insertConflictTarget.whereExpression = it as Expression?
+        }
+    }
+
+    override fun visit(columnDefinition: ColumnDefinition?, context: SqlContext) {
+
+    }
+
+    override fun visit(index: Index?, context: SqlContext) {
+
+    }
+
+    override fun visit(distinct: Distinct?, context: SqlContext) {
+        visitList(distinct?.onSelectItems) { it, cxt -> it.accept(this, cxt) }
+        if (distinct?.onSelectItems.isNullOrEmpty()) {
+            context.remove()
+        }
+    }
+
+    override fun visit(fetch: Fetch?, context: SqlContext) {
+        fetch?.expression?.accept(this) { fetch.expression = it as Expression? }
+    }
+
+    override fun visit(first: First?, context: SqlContext) {
+        first?.jdbcParameter?.accept(this) { first.jdbcParameter = it as JdbcParameter? }
+    }
+
+    override fun visit(join: Join?, context: SqlContext) {
+        join ?: return
+        if (visitSingleFromItem(context, { join.rightItem }, { join.rightItem = it })) {
+            return
+        }
+        visitExpressions(join.onExpressions as LinkedList<Expression>?)
+        visitExpressions<Column>(join.usingColumns)
+    }
+
+    override fun visit(jsonFunctionExpression: JsonFunctionExpression?, context: SqlContext) {
+        visitSingleExpression(context, { jsonFunctionExpression?.expression }) {
+            val replacement = JsonFunctionExpression(it)
+            replacement.isUsingFormatJson = jsonFunctionExpression?.isUsingFormatJson ?: false
+            context.replace(replacement)
+        }
+    }
+
+    override fun visit(multipleExpression: MultipleExpression?, context: SqlContext) {
+        visitExpressions(multipleExpression?.list)
+    }
+
+    override fun visit(namedExpressionList: NamedExpressionList<out Expression?>?, context: SqlContext) {
+        visit(namedExpressionList as ExpressionList<out Expression?>, context)
+    }
+
+    override fun visit(lateralView: LateralView?, context: SqlContext) {
+        visitSingleExpression<Function?>(
+            context,
+            { lateralView?.generatorFunction },
+            { lateralView?.generatorFunction = it }
+        )
     }
 
     override fun visit(limit: Limit?, context: SqlContext) {
-        limit?.offset?.accept(this) { limit.offset = it as Expression? }
         limit?.rowCount?.accept(this) { limit.rowCount = it as Expression? }
+        limit?.offset?.accept(this) { limit.offset = it as Expression? }
+        visitExpressions(limit?.byExpressions)
     }
 
     override fun visit(offset: Offset?, context: SqlContext) {
-        offset?.offset?.accept(this) { offset.offset = it as Expression? }
+        visitSingleExpression(context, { offset?.offset }, { offset?.offset = it })
+    }
+
+    override fun visit(skip: Skip?, context: SqlContext) {
+        skip?.jdbcParameter?.accept(this) { skip.jdbcParameter = it as JdbcParameter? }
+    }
+
+    override fun visit(top: Top?, context: SqlContext) {
+        visitSingleExpression(context, { top?.expression }, { top?.expression = it })
     }
 
     override fun visit(orderByClause: OrderByClause?, context: SqlContext) {
         visitOrderByElements(orderByClause?.orderByElements)
     }
 
+    override fun visit(partition: Partition?, context: SqlContext) {
+        partition ?: return
+        if (visitSingleExpression<Column>(context, { partition.column }, { partition.column = it })) {
+            return
+        }
+        partition.value?.accept(this) { partition.value = it as Expression? }
+    }
+
     override fun visit(partitionByClause: PartitionByClause?, context: SqlContext) {
-        partitionByClause?.partitionExpressionList?.accept(this) {
-            partitionByClause.partitionExpressionList = it as ExpressionList?
+        visitExpressions(partitionByClause?.partitionExpressionList)
+        if (partitionByClause?.partitionExpressionList.isNullOrEmpty()) {
+            context.remove()
         }
     }
 
+    override fun visit(preferringClause: PreferringClause?, context: SqlContext) {
+        preferringClause ?: return
+        if (visitSingleExpression(context, { preferringClause.preferring }, { preferringClause.preferring = it })) {
+            return
+        }
+        preferringClause.partitionBy?.accept(this) { preferringClause.partitionBy = it as PartitionByClause? }
+    }
+
     override fun visit(outputClause: OutputClause?, context: SqlContext) {
-        visitSelectItems(outputClause?.selectItemList)
+        visitList(outputClause?.selectItemList) { it, cxt -> it.accept(this, cxt) }
         outputClause?.tableVariable?.accept(this) { outputClause.tableVariable = it as UserVariable? }
         outputClause?.outputTable?.accept(this) { outputClause.outputTable = it as Table? }
     }
 
+    override fun visit(returningClause: ReturningClause?, context: SqlContext) {
+        visitList(returningClause) { it, cxt -> it.accept(this, cxt) }
+    }
+
     override fun visit(windowDefinition: WindowDefinition?, context: SqlContext) {
-        windowDefinition?.orderBy?.accept(this) {
-            if (it == null) {
-                windowDefinition.orderBy.orderByElements = null
-            } else {
-                windowDefinition.orderBy.orderByElements = (it as OrderByClause).orderByElements
-            }
-        }
-        windowDefinition?.partitionBy?.accept(this) {
-            if (it == null) {
-                windowDefinition.partitionBy.partitionExpressionList = null
-            } else {
-                val other = it as PartitionByClause
-                windowDefinition.partitionBy.setPartitionExpressionList(other.partitionExpressionList, other.isBrackets)
-            }
-        }
+        visitOrderByElements(windowDefinition?.orderByElements)
+        visitExpressions(windowDefinition?.partitionExpressionList)
         windowDefinition?.windowElement?.accept(this) { windowDefinition.windowElement = it as WindowElement? }
     }
 
@@ -1106,8 +1590,13 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(spannerInterleaveIn: SpannerInterleaveIn, context: SqlContext) {
-        spannerInterleaveIn.table?.accept(this) { spannerInterleaveIn.table = it as Table? }
+        visitSingleFromItem(context, { spannerInterleaveIn.table }, { spannerInterleaveIn.table = it })
     }
 
-    override fun visit(simpleExpression: SimpleExpression, context: SqlContext) {}
+    override fun visit(simpleExpression: SimpleExpression, context: SqlContext) {
+
+    }
+
+    // -------------------------- other visitor end --------------------------
+
 }
