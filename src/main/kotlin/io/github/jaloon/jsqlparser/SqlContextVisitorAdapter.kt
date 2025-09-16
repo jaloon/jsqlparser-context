@@ -1,5 +1,6 @@
 package io.github.jaloon.jsqlparser
 
+import io.github.jaloon.jsqlparser.expression.PostgreCollate
 import io.github.jaloon.jsqlparser.expression.SimpleExpression
 import io.github.jaloon.jsqlparser.expression.accept
 import io.github.jaloon.jsqlparser.expression.operators.accept
@@ -1589,11 +1590,15 @@ open class SqlContextVisitorAdapter : SqlContextVisitor {
         windowRange?.end?.accept(this) { windowRange.end = it as WindowOffset? }
     }
 
-    override fun visit(spannerInterleaveIn: SpannerInterleaveIn, context: SqlContext) {
-        visitSingleFromItem(context, { spannerInterleaveIn.table }, { spannerInterleaveIn.table = it })
+    override fun visit(spannerInterleaveIn: SpannerInterleaveIn?, context: SqlContext) {
+        visitSingleFromItem(context, { spannerInterleaveIn?.table }, { spannerInterleaveIn?.table = it })
     }
 
-    override fun visit(simpleExpression: SimpleExpression, context: SqlContext) {
+    override fun visit(postgreCollate: PostgreCollate?, context: SqlContext) {
+        visitSingleExpression(context, { postgreCollate?.expression }, { postgreCollate?.expression = it })
+    }
+
+    override fun visit(simpleExpression: SimpleExpression?, context: SqlContext) {
 
     }
 

@@ -1,5 +1,6 @@
 package io.github.jaloon.jsqlparser
 
+import io.github.jaloon.jsqlparser.expression.PostgreCollate
 import io.github.jaloon.jsqlparser.expression.SimpleExpression
 import net.sf.jsqlparser.expression.*
 import net.sf.jsqlparser.expression.Function
@@ -337,8 +338,9 @@ interface SqlContextVisitor {
     fun visit(windowElement: WindowElement?, context: SqlContext)
     fun visit(windowOffset: WindowOffset?, context: SqlContext)
     fun visit(windowRange: WindowRange?, context: SqlContext)
-    fun visit(spannerInterleaveIn: SpannerInterleaveIn, context: SqlContext)
-    fun visit(simpleExpression: SimpleExpression, context: SqlContext)
+    fun visit(spannerInterleaveIn: SpannerInterleaveIn?, context: SqlContext)
+    fun visit(postgreCollate: PostgreCollate?, context: SqlContext)
+    fun visit(simpleExpression: SimpleExpression?, context: SqlContext)
     // -------------------------- other visitor end --------------------------
 
 }
