@@ -19,4 +19,17 @@ fun interface SqlContext {
      * 替换节点
      */
     fun replace(replacement: Any?)
+
+    /**
+     * @since 5.3
+     */
+    companion object {
+        /**
+         * 默认上下文 (不进行任何操作)
+         *
+         * @since 5.3
+         */
+        @JvmField
+        val DO_NOTHING: SqlContext = SqlContext {}
+    }
 }
