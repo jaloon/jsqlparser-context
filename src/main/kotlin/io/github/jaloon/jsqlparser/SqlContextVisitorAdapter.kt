@@ -1,5 +1,6 @@
 package io.github.jaloon.jsqlparser
 
+import io.github.jaloon.jsqlparser.annotation.AllOpen
 import io.github.jaloon.jsqlparser.expression.PostgreCollate
 import io.github.jaloon.jsqlparser.expression.SimpleExpression
 import io.github.jaloon.jsqlparser.expression.accept
@@ -69,7 +70,8 @@ import java.util.function.Supplier
  * @author jaloon
  */
 @Suppress("UNCHECKED_CAST")
-open class SqlContextVisitorAdapter : SqlContextVisitor {
+@AllOpen
+class SqlContextVisitorAdapter : SqlContextVisitor {
 
     // -------------------------- visitor tool functions begin --------------------------
 

@@ -2,6 +2,7 @@ package io.github.jaloon.jsqlparser.expression
 
 import io.github.jaloon.jsqlparser.SqlContext
 import io.github.jaloon.jsqlparser.SqlContextVisitor
+import io.github.jaloon.jsqlparser.annotation.AllOpen
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.ExpressionVisitor
 import net.sf.jsqlparser.parser.ASTNodeAccessImpl
@@ -11,6 +12,7 @@ import net.sf.jsqlparser.parser.ASTNodeAccessImpl
  *
  * @since 5.3
  */
+@AllOpen
 class PostgreCollate(var expression: Expression?, var collate: String) : ASTNodeAccessImpl(), Expression {
 
     constructor(expression: Expression?) : this(expression, "C")
