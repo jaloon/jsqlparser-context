@@ -664,19 +664,15 @@ class SqlContextVisitorAdapter : SqlContextVisitor {
     }
 
     override fun visit(connectByRootOperator: ConnectByRootOperator?, context: SqlContext) {
-        visitSingleExpression<Column?>(
-            context,
-            { connectByRootOperator?.column },
-            { context.replace(ConnectByRootOperator(it)) }
-        )
+        visitSingleExpression(context, { connectByRootOperator?.column }) {
+            context.replace(ConnectByRootOperator(it))
+        }
     }
 
     override fun visit(connectByPriorOperator: ConnectByPriorOperator?, context: SqlContext) {
-        visitSingleExpression<Column?>(
-            context,
-            { connectByPriorOperator?.column },
-            { context.replace(ConnectByRootOperator(it)) }
-        )
+        visitSingleExpression(context, { connectByPriorOperator?.column }) {
+            context.replace(ConnectByPriorOperator(it))
+        }
     }
 
     override fun visit(oracleNamedFunctionParameter: OracleNamedFunctionParameter?, context: SqlContext) {
@@ -1486,7 +1482,7 @@ class SqlContextVisitorAdapter : SqlContextVisitor {
 
     override fun visit(join: Join?, context: SqlContext) {
         join ?: return
-        if (visitSingleFromItem(context, { join.rightItem }, { join.rightItem = it })) {
+        if (visitSingleFromItem(context, { join.fromItem }, { join.fromItem = it })) {
             return
         }
         visitExpressions(join.onExpressions as LinkedList<Expression>?)
